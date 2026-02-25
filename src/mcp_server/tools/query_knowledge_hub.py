@@ -155,13 +155,9 @@ class QueryKnowledgeHubTool:
         Args:
             collection: Target collection name.
         """
-        # Fast path: already initialised for the same collection
-        if self._initialized and self._current_collection == collection:
-            logger.debug(
-                "Query components already initialised for collection: %s",
-                collection,
-            )
-            return
+        # Always rebuild vector_store and retriever components so that
+        # data ingested by other processes (e.g. Dashboard) is visible
+        # immediately without requiring an MCP Server restart.
         
         logger.info(f"Initializing query components for collection: {collection}")
         

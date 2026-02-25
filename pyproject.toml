@@ -28,6 +28,7 @@ dependencies = [
     "langchain-text-splitters>=0.3.0",
     "chromadb>=0.4.0",
     "mcp>=1.0.0",
+    "jieba>=0.42",
 ]
 
 [project.optional-dependencies]

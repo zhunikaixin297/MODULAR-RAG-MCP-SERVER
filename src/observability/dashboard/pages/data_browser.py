@@ -27,12 +27,53 @@ def render() -> None:
         return
 
     # ── Collection selector ────────────────────────────────────────
-    collection = st.text_input(
-        "Collection name (leave blank = `default`)",
-        value="default",
+    collections = svc.list_collections()
+    if "default" not in collections:
+        collections.insert(0, "default")
+    collection = st.selectbox(
+        "Collection",
+        options=collections,
+        index=0,
         key="db_collection_filter",
     )
-    coll_arg = collection.strip() if collection.strip() else None
+    coll_arg = collection if collection else None
+
+    # ── Danger zone: clear all data ────────────────────────────────
+    st.divider()
+    with st.expander("⚠️ Danger Zone", expanded=False):
+        st.warning(
+            "This will **permanently delete** all data: "
+            "ChromaDB collections, BM25 indexes, images, ingestion history, and trace logs."
+        )
+        col_btn, col_status = st.columns([1, 2])
+        with col_btn:
+            if st.button("🗑️ Clear All Data", type="primary", key="btn_clear_all"):
+                st.session_state["confirm_clear"] = True
+
+        if st.session_state.get("confirm_clear"):
+            st.error("Are you sure? This action cannot be undone!")
+            c1, c2, _ = st.columns([1, 1, 2])
+            with c1:
+                if st.button("✅ Yes, delete everything", key="btn_confirm_clear"):
+                    result = svc.reset_all()
+                    st.session_state["confirm_clear"] = False
+                    if result["errors"]:
+                        st.warning(
+                            f"Cleared with {len(result['errors'])} error(s): "
+                            + "; ".join(result["errors"])
+                        )
+                    else:
+                        st.success(
+                            f"All data cleared! "
+                            f"{result['collections_deleted']} collection(s) deleted."
+                        )
+                    st.rerun()
+            with c2:
+                if st.button("❌ Cancel", key="btn_cancel_clear"):
+                    st.session_state["confirm_clear"] = False
+                    st.rerun()
+
+    st.divider()
 
     # ── Document list ──────────────────────────────────────────────
     try:
@@ -42,7 +83,11 @@ def render() -> None:
         return
 
     if not docs:
-        st.info("No documents found. Ingest some data first!")
+        st.info(
+            "**No documents found in this collection.** "
+            "Use the Ingestion Manager page to upload and ingest files, "
+            "or select a different collection from the dropdown above."
+        )
         return
 
     st.subheader(f"📄 Documents ({len(docs)})")

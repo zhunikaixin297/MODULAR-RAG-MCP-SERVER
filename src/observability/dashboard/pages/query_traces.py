@@ -104,6 +104,12 @@ def render() -> None:
             with rc5:
                 st.metric("Total Time", total_label)
 
+            # ── Diagnostic hints ───────────────────────────────
+            _render_diagnostics(
+                stages_by_name, dense_d, sparse_d, fusion_d, rerank_d,
+                dense_count, sparse_count,
+            )
+
             st.divider()
 
             # ── 3. Stage timing waterfall ──────────────────────
@@ -151,18 +157,87 @@ def render() -> None:
                         if key == "query_processing":
                             _render_query_processing_stage(data)
                         elif key == "dense_retrieval":
-                            _render_retrieval_stage(data, "Dense")
+                            _render_retrieval_stage(data, "Dense", trace_idx=idx)
                         elif key == "sparse_retrieval":
-                            _render_retrieval_stage(data, "Sparse")
+                            _render_retrieval_stage(data, "Sparse", trace_idx=idx)
                         elif key == "fusion":
-                            _render_fusion_stage(data)
+                            _render_fusion_stage(data, trace_idx=idx)
                         elif key == "rerank":
-                            _render_rerank_stage(data)
+                            _render_rerank_stage(data, trace_idx=idx)
             else:
                 st.info("No stage details available.")
 
             # ── 5. Ragas Evaluate button ───────────────────────
             _render_evaluate_button(trace, idx)
+
+
+def _render_diagnostics(
+    stages_by_name: Dict[str, Any],
+    dense_d: Dict[str, Any],
+    sparse_d: Dict[str, Any],
+    fusion_d: Dict[str, Any],
+    rerank_d: Dict[str, Any],
+    dense_count: int,
+    sparse_count: int,
+) -> None:
+    """Render diagnostic hints about missing or errored pipeline stages."""
+    hints: list = []
+
+    # Dense errors
+    dense_err = dense_d.get("error", "")
+    if dense_err:
+        hints.append(("error", f"**Dense Retrieval failed:** {dense_err}"))
+    elif dense_count == 0 and "dense_retrieval" in stages_by_name:
+        hints.append(("warning", "Dense Retrieval returned **0 results**. Check if the collection has indexed data."))
+
+    # Sparse errors / empty
+    sparse_err = sparse_d.get("error", "")
+    if sparse_err:
+        hints.append(("error", f"**Sparse Retrieval failed:** {sparse_err}"))
+    elif sparse_count == 0 and "sparse_retrieval" in stages_by_name:
+        hints.append((
+            "warning",
+            "Sparse (BM25) Retrieval returned **0 results**. "
+            "BM25 index may be empty or not yet built for this collection.",
+        ))
+
+    # Fusion missing
+    if "fusion" not in stages_by_name:
+        if dense_count > 0 and sparse_count > 0:
+            hints.append(("info", "Fusion stage was not recorded even though both retrievers returned results."))
+        elif dense_count == 0 or sparse_count == 0:
+            only_source = "Dense" if dense_count > 0 else ("Sparse" if sparse_count > 0 else "neither")
+            hints.append((
+                "info",
+                f"**Fusion (RRF) skipped:** only {only_source} retrieval returned results. "
+                "Fusion requires both Dense and Sparse results to merge.",
+            ))
+
+    # Rerank missing
+    if "rerank" not in stages_by_name:
+        if dense_count > 0 or sparse_count > 0:
+            hints.append((
+                "info",
+                "**Rerank skipped:** reranker is not enabled or not configured. "
+                "Enable `reranker` in settings.yaml to apply LLM-based reranking.",
+            ))
+
+    # All results empty
+    if dense_count == 0 and sparse_count == 0:
+        hints.append((
+            "warning",
+            "**No results found.** The collection may be empty, or the query "
+            "doesn't match any indexed content. Try ingesting data first.",
+        ))
+
+    # Render hints
+    for level, msg in hints:
+        if level == "error":
+            st.error(msg)
+        elif level == "warning":
+            st.warning(msg)
+        else:
+            st.info(msg)
 
 
 def _render_evaluate_button(trace: Dict[str, Any], idx: int) -> None:
@@ -223,7 +298,7 @@ def _evaluate_single_trace(
         ragas_eval = EvaluationSettings(
             enabled=True,
             provider="ragas",
-            metrics=list(settings.evaluation.metrics) if settings.evaluation.metrics else [],
+            metrics=["faithfulness", "answer_relevancy", "context_precision"],
         )
         settings = dc_replace(settings, evaluation=ragas_eval)
         evaluator = EvaluatorFactory.create(settings)
@@ -375,7 +450,7 @@ def _render_query_processing_stage(data: Dict[str, Any]) -> None:
         st.warning("No keywords extracted.")
 
 
-def _render_retrieval_stage(data: Dict[str, Any], label: str) -> None:
+def _render_retrieval_stage(data: Dict[str, Any], label: str, *, trace_idx: int = 0) -> None:
     """Render Dense or Sparse retrieval stage: method, counts, chunk list."""
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -391,12 +466,12 @@ def _render_retrieval_stage(data: Dict[str, Any], label: str) -> None:
 
     chunks = data.get("chunks", [])
     if chunks:
-        _render_chunk_list(chunks, prefix=f"{label.lower().replace(' ', '_')}_chunk")
+        _render_chunk_list(chunks, prefix=f"{label.lower().replace(' ', '_')}_chunk_{trace_idx}")
     else:
         st.info(f"No {label.lower()} results returned.")
 
 
-def _render_fusion_stage(data: Dict[str, Any]) -> None:
+def _render_fusion_stage(data: Dict[str, Any], *, trace_idx: int = 0) -> None:
     """Render Fusion (RRF) stage: input lists, fused result count, chunk list."""
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -410,12 +485,12 @@ def _render_fusion_stage(data: Dict[str, Any]) -> None:
 
     chunks = data.get("chunks", [])
     if chunks:
-        _render_chunk_list(chunks, prefix="fusion_chunk")
+        _render_chunk_list(chunks, prefix=f"fusion_chunk_{trace_idx}")
     else:
         st.info("No fusion results.")
 
 
-def _render_rerank_stage(data: Dict[str, Any]) -> None:
+def _render_rerank_stage(data: Dict[str, Any], *, trace_idx: int = 0) -> None:
     """Render Rerank stage: method, input/output counts, reranked chunk list."""
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -429,7 +504,7 @@ def _render_rerank_stage(data: Dict[str, Any]) -> None:
 
     chunks = data.get("chunks", [])
     if chunks:
-        _render_chunk_list(chunks, prefix="rerank_chunk")
+        _render_chunk_list(chunks, prefix=f"rerank_chunk_{trace_idx}")
     else:
         st.info("No reranked results.")
 

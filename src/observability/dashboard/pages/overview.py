@@ -64,10 +64,18 @@ def render() -> None:
 
     stats = _safe_collection_stats()
     if stats:
-        for name, info in stats.items():
-            st.metric(label=name, value=info.get("chunk_count", "?"))
+        stat_cols = st.columns(min(len(stats), 4))
+        for idx, (name, info) in enumerate(sorted(stats.items())):
+            with stat_cols[idx % len(stat_cols)]:
+                count = info.get("chunk_count", "?")
+                st.metric(label=name, value=count)
+                if count == 0 or count == "?":
+                    st.caption("⚠️ Empty")
     else:
-        st.info("No collections found or ChromaDB unavailable. Ingest some documents first!")
+        st.warning(
+            "**No collections found or ChromaDB unavailable.** "
+            "Go to the Ingestion Manager page to upload and ingest documents."
+        )
 
     # ── Trace file statistics ──────────────────────────────────────
     st.subheader("📈 Trace Statistics")

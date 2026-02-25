@@ -13,6 +13,9 @@ Design Principles:
 from typing import List, Dict, Optional, Any
 from collections import Counter
 import re
+
+import jieba
+
 from src.core.types import Chunk
 
 
@@ -131,10 +134,9 @@ class SparseEncoder:
     def _tokenize(self, text: str) -> List[str]:
         """Tokenize text into terms.
         
-        Current implementation:
-        - Split on whitespace and punctuation
-        - Optionally lowercase
-        - Filter by minimum term length
+        Uses jieba for Chinese text segmentation and regex for English.
+        This ensures consistent tokenization with the query-side
+        (QueryProcessor), which is required for BM25 matching.
         
         Args:
             text: Input text to tokenize
@@ -142,9 +144,20 @@ class SparseEncoder:
         Returns:
             List of valid terms
         """
-        # Split on whitespace and common punctuation
-        # Keep alphanumeric and hyphens, underscores
-        tokens = re.findall(r'\b[\w-]+\b', text)
+        tokens: List[str] = []
+
+        # Use jieba to segment the text (handles both Chinese and English)
+        raw_tokens = jieba.lcut(text)
+
+        # Clean tokens: keep only alphanumeric and Chinese characters
+        for token in raw_tokens:
+            token = token.strip()
+            if not token:
+                continue
+            # Skip pure punctuation / whitespace
+            if re.fullmatch(r'[\s\W]+', token, re.UNICODE):
+                continue
+            tokens.append(token)
         
         # Apply lowercase if configured
         if self.lowercase:

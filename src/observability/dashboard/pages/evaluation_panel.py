@@ -77,7 +77,11 @@ def render() -> None:
 
     # Validate golden set exists
     if not golden_path.exists():
-        st.warning(f"⚠️ Golden test set not found: `{golden_path}`")
+        st.warning(
+            f"⚠️ **Golden test set not found:** `{golden_path}`. "
+            "Create a JSON file with test queries and expected results. "
+            "See `tests/fixtures/golden_test_set.json` for the format."
+        )
 
     # ── Run Evaluation ─────────────────────────────────────────────
     st.divider()
@@ -275,7 +279,9 @@ def _render_history() -> None:
     history = _load_history()
     if not history:
         st.info(
-            "No evaluation history yet. Run an evaluation to start tracking!"
+            "**No evaluation history yet.** "
+            "Configure the evaluator above and click \"Run Evaluation\" to start. "
+            "Results will be saved here for comparison across runs."
         )
         return
 

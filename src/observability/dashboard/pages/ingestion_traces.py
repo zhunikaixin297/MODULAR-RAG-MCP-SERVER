@@ -94,6 +94,9 @@ def render() -> None:
                     for t in main_stages
                 ])
 
+            # ── Diagnostics ───────────────────────────────────
+            _render_ingestion_diagnostics(stages_by_name, load_d, split_d, transform_d, embed_d, upsert_d)
+
             st.divider()
 
             # ── 3. Per-stage detail tabs ───────────────────────
@@ -122,11 +125,11 @@ def render() -> None:
                             st.caption(f"⏱️ {elapsed:.1f} ms")
 
                         if key == "load":
-                            _render_load_stage(data)
+                            _render_load_stage(data, trace_idx=idx)
                         elif key == "split":
-                            _render_split_stage(data)
+                            _render_split_stage(data, trace_idx=idx)
                         elif key == "transform":
-                            _render_transform_stage(data)
+                            _render_transform_stage(data, trace_idx=idx)
                         elif key == "embed":
                             _render_embed_stage(data)
                         elif key == "upsert":
@@ -135,11 +138,68 @@ def render() -> None:
                 st.info("No stage details available.")
 
 
+def _render_ingestion_diagnostics(
+    stages_by_name: Dict[str, Any],
+    load_d: Dict[str, Any],
+    split_d: Dict[str, Any],
+    transform_d: Dict[str, Any],
+    embed_d: Dict[str, Any],
+    upsert_d: Dict[str, Any],
+) -> None:
+    """Render diagnostic hints for ingestion pipeline stages."""
+    expected = ["load", "split", "transform", "embed", "upsert"]
+    present = [s for s in expected if s in stages_by_name]
+    missing = [s for s in expected if s not in stages_by_name]
+
+    if missing:
+        missing_labels = {"load": "📄 Load", "split": "✂️ Split", "transform": "🔄 Transform", "embed": "🔢 Embed", "upsert": "💾 Upsert"}
+        names = ", ".join(missing_labels.get(m, m) for m in missing)
+        if "load" in missing:
+            st.error(
+                f"**Pipeline incomplete — missing stages: {names}.** "
+                "The Load stage failed or was skipped. The document may be corrupted or unsupported."
+            )
+        else:
+            st.warning(
+                f"**Pipeline incomplete — missing stages: {names}.** "
+                "An error may have occurred during processing. Check the logs for details."
+            )
+
+    # Stage-specific diagnostics
+    if "load" in stages_by_name and load_d.get("text_length", 0) == 0:
+        st.warning("**Load stage produced empty text.** The document may be image-only or in an unsupported format.")
+
+    if "split" in stages_by_name and split_d.get("chunk_count", 0) == 0:
+        st.warning("**Split stage produced 0 chunks.** The document text may be too short or empty.")
+
+    if "transform" in stages_by_name:
+        refined_llm = transform_d.get("refined_by_llm", 0)
+        refined_rule = transform_d.get("refined_by_rule", 0)
+        if refined_llm == 0 and refined_rule == 0:
+            st.info("**Transform:** No chunks were refined. LLM refinement may be disabled or skipped for short chunks.")
+
+    if "embed" in stages_by_name and embed_d.get("dense_vector_count", 0) == 0:
+        st.warning("**Embed stage produced 0 vectors.** Embedding API may have failed. Check API key and endpoint.")
+
+    if "upsert" in stages_by_name:
+        vec_count = upsert_d.get("vector_count", upsert_d.get("dense_store", {}).get("count", 0))
+        if vec_count == 0:
+            st.warning("**Upsert stage stored 0 vectors.** Database write may have failed.")
+
+    # Check for error fields in any stage data
+    for stage_name in present:
+        stage_data = stages_by_name[stage_name].get("data", {})
+        err = stage_data.get("error", "")
+        if err:
+            label = stage_name.replace("_", " ").title()
+            st.error(f"**{label} stage error:** {err}")
+
+
 # ═══════════════════════════════════════════════════════════════
 # Per-stage renderers
 # ═══════════════════════════════════════════════════════════════
 
-def _render_load_stage(data: Dict[str, Any]) -> None:
+def _render_load_stage(data: Dict[str, Any], *, trace_idx: int = 0) -> None:
     """Render Load stage: raw document preview."""
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -158,12 +218,13 @@ def _render_load_stage(data: Dict[str, Any]) -> None:
             height=max(120, min(len(preview) // 2, 600)),
             disabled=True,
             label_visibility="collapsed",
+            key=f"load_raw_text_{trace_idx}",
         )
     else:
         st.info("No text preview recorded in this trace.")
 
 
-def _render_split_stage(data: Dict[str, Any]) -> None:
+def _render_split_stage(data: Dict[str, Any], *, trace_idx: int = 0) -> None:
     """Render Split stage: chunk list with texts."""
     c1, c2 = st.columns(2)
     with c1:
@@ -186,12 +247,13 @@ def _render_split_stage(data: Dict[str, Any]) -> None:
                     height=max(100, min(len(text) // 2, 500)),
                     disabled=True,
                     label_visibility="collapsed",
+                    key=f"split_{trace_idx}_{i}",
                 )
     else:
         st.info("No chunk text recorded. Re-run ingestion to generate new traces.")
 
 
-def _render_transform_stage(data: Dict[str, Any]) -> None:
+def _render_transform_stage(data: Dict[str, Any], *, trace_idx: int = 0) -> None:
     """Render Transform stage: before/after refinement + enrichment metadata."""
     # Summary metrics
     c1, c2, c3 = st.columns(3)
@@ -260,6 +322,7 @@ def _render_transform_stage(data: Dict[str, Any]) -> None:
                             height=_h,
                             disabled=True,
                             label_visibility="collapsed",
+                            key=f"transform_before_{trace_idx}_{i}",
                         )
                     with col_after:
                         st.markdown("*After refinement + enrichment:*")
@@ -269,6 +332,7 @@ def _render_transform_stage(data: Dict[str, Any]) -> None:
                             height=_h,
                             disabled=True,
                             label_visibility="collapsed",
+                            key=f"transform_after_{trace_idx}_{i}",
                         )
     else:
         st.info("No per-chunk transform data recorded. Re-run ingestion for new traces.")

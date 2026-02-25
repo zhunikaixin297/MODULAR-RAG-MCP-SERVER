@@ -78,6 +78,26 @@ class DataService:
     # Public API
     # ------------------------------------------------------------------
 
+    def list_collections(self) -> List[str]:
+        """Return all available ChromaDB collection names."""
+        try:
+            from src.core.settings import load_settings, resolve_path
+            import chromadb
+            from chromadb.config import Settings as ChromaSettings
+
+            settings = load_settings()
+            persist_dir = str(
+                resolve_path(settings.vector_store.persist_directory)
+            )
+            client = chromadb.PersistentClient(
+                path=persist_dir,
+                settings=ChromaSettings(anonymized_telemetry=False, allow_reset=True),
+            )
+            return sorted(c.name for c in client.list_collections())
+        except Exception as exc:
+            logger.warning("Failed to list collections: %s", exc)
+            return ["default"]
+
     def list_documents(
         self, collection: Optional[str] = None
     ) -> List[Dict[str, Any]]:
@@ -171,3 +191,87 @@ class DataService:
 
         stats = self._manager.get_collection_stats(collection)
         return asdict(stats)
+
+    def reset_all(self) -> Dict[str, Any]:
+        """Delete ALL data: ChromaDB collections, BM25 indexes, images, integrity DB, and trace logs.
+
+        Returns a summary dict with counts of what was deleted.
+        """
+        import shutil
+        from src.core.settings import load_settings, resolve_path
+        import chromadb
+        from chromadb.config import Settings as ChromaSettings
+
+        summary: Dict[str, Any] = {
+            "collections_deleted": 0,
+            "bm25_cleared": False,
+            "images_cleared": False,
+            "integrity_cleared": False,
+            "traces_cleared": False,
+            "errors": [],
+        }
+
+        settings = load_settings()
+
+        # 1. Delete all ChromaDB collections
+        try:
+            persist_dir = str(resolve_path(settings.vector_store.persist_directory))
+            client = chromadb.PersistentClient(
+                path=persist_dir,
+                settings=ChromaSettings(anonymized_telemetry=False, allow_reset=True),
+            )
+            colls = client.list_collections()
+            for c in colls:
+                client.delete_collection(c.name)
+                summary["collections_deleted"] += 1
+        except Exception as exc:
+            summary["errors"].append(f"ChromaDB: {exc}")
+
+        # 2. Clear BM25 indexes (remove entire bm25 directory)
+        try:
+            bm25_dir = resolve_path("data/db/bm25")
+            if bm25_dir.exists():
+                shutil.rmtree(bm25_dir)
+                bm25_dir.mkdir(parents=True, exist_ok=True)
+            summary["bm25_cleared"] = True
+        except Exception as exc:
+            summary["errors"].append(f"BM25: {exc}")
+
+        # 3. Clear image storage (SQLite DB + image files)
+        try:
+            img_db = resolve_path("data/db/image_index.db")
+            if img_db.exists():
+                img_db.unlink()
+            img_dir = resolve_path("data/images")
+            if img_dir.exists():
+                shutil.rmtree(img_dir)
+                img_dir.mkdir(parents=True, exist_ok=True)
+            summary["images_cleared"] = True
+        except Exception as exc:
+            summary["errors"].append(f"Images: {exc}")
+
+        # 4. Clear file integrity database
+        try:
+            integrity_db = resolve_path("data/db/ingestion_history.db")
+            if integrity_db.exists():
+                integrity_db.unlink()
+            summary["integrity_cleared"] = True
+        except Exception as exc:
+            summary["errors"].append(f"Integrity: {exc}")
+
+        # 5. Clear trace logs
+        try:
+            traces_file = resolve_path("logs/traces.jsonl")
+            if traces_file.exists():
+                traces_file.unlink()
+            summary["traces_cleared"] = True
+        except Exception as exc:
+            summary["errors"].append(f"Traces: {exc}")
+
+        # Reset internal state so next call re-initializes
+        self._manager = None
+        self._chroma = None
+        self._images = None
+        self._current_collection = ""
+
+        return summary

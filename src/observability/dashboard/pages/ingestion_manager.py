@@ -111,7 +111,10 @@ def render() -> None:
         return
 
     if not docs:
-        st.info("No documents ingested yet.")
+        st.info(
+            "**No documents ingested yet.** "
+            "Upload a PDF, TXT, MD, or DOCX file above and click \"Start Ingestion\" to begin."
+        )
         return
 
     for idx, doc in enumerate(docs):

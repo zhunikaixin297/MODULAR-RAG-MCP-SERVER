@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Pattern, Set
 
+import jieba
+
 from src.core.types import ProcessedQuery
 
 
@@ -208,9 +210,9 @@ class QueryProcessor:
     def _tokenize(self, text: str) -> List[str]:
         """Tokenize text into words/terms.
         
-        Uses a hybrid approach:
-        - Split on whitespace and punctuation for English
-        - Character-based extraction for Chinese (simple approach)
+        Uses jieba for Chinese text segmentation, consistent with the
+        index-side tokenizer (SparseEncoder) so BM25 matching works.
+        English text is handled natively by jieba (preserved as-is).
         
         Args:
             text: Text to tokenize
@@ -219,28 +221,18 @@ class QueryProcessor:
             List of tokens
         """
         tokens: List[str] = []
-        
-        # Split on whitespace and common delimiters
-        # Keep alphanumeric, Chinese characters, hyphens, underscores
-        pattern = re.compile(r'[\w\u4e00-\u9fff]+[-_\w\u4e00-\u9fff]*', re.UNICODE)
-        raw_tokens = pattern.findall(text)
-        
+
+        # Use jieba to segment (handles Chinese + keeps English intact)
+        raw_tokens = jieba.lcut(text)
+
         for token in raw_tokens:
-            # Check if token contains Chinese characters
-            if re.search(r'[\u4e00-\u9fff]', token):
-                # For mixed Chinese-English tokens, split carefully
-                # Extract Chinese sequences and non-Chinese sequences separately
-                parts = re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z0-9_-]+', token)
-                for part in parts:
-                    if re.match(r'[\u4e00-\u9fff]+', part):
-                        # Chinese: add as single token (could do char-level later)
-                        tokens.append(part)
-                    else:
-                        # English/number: add as-is
-                        tokens.append(part)
-            else:
-                # Pure English/number token
-                tokens.append(token)
+            token = token.strip()
+            if not token:
+                continue
+            # Skip pure punctuation / whitespace
+            if re.fullmatch(r'[\s\W]+', token, re.UNICODE):
+                continue
+            tokens.append(token)
         
         return tokens
     
