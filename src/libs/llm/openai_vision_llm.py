@@ -121,6 +121,13 @@ class OpenAIVisionLLM(BaseVisionLLM):
         
         self._use_azure_auth = False
         
+        # Check settings for base_url if not provided explicitly
+        if not base_url:
+            if vision_settings:
+                base_url = getattr(vision_settings, 'base_url', None)
+            if not base_url:
+                base_url = getattr(settings.llm, 'base_url', None)
+
         if base_url:
             self.base_url = base_url
         elif azure_endpoint:
@@ -183,6 +190,7 @@ class OpenAIVisionLLM(BaseVisionLLM):
             api_messages.extend([{"role": m.role, "content": m.content} for m in messages])
         
         # Add current text + image message
+        # For Zhipu AI compatibility: ensure text object is first, then image object
         current_message = {
             "role": "user",
             "content": [
@@ -193,7 +201,7 @@ class OpenAIVisionLLM(BaseVisionLLM):
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:{processed_image.mime_type};base64,{image_base64}"
+                        "url": f"{image_base64}" if image_base64.startswith("http") else f"data:{processed_image.mime_type};base64,{image_base64}"
                     }
                 }
             ]
@@ -202,10 +210,14 @@ class OpenAIVisionLLM(BaseVisionLLM):
         
         # Make API call
         try:
+            # Check if this is a Zhipu AI model to adjust parameters if needed
+            is_zhipu = "glm" in self.model.lower()
+            
             response_data = self._call_api(
                 messages=api_messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                is_zhipu=is_zhipu
             )
             
             content = response_data["choices"][0]["message"]["content"]
@@ -310,6 +322,7 @@ class OpenAIVisionLLM(BaseVisionLLM):
         messages: list[dict],
         temperature: float,
         max_tokens: int,
+        is_zhipu: bool = False,
     ) -> dict:
         """Make HTTP request to the Vision API.
         
@@ -317,6 +330,7 @@ class OpenAIVisionLLM(BaseVisionLLM):
             messages: List of API-formatted messages.
             temperature: Generation temperature.
             max_tokens: Maximum tokens to generate.
+            is_zhipu: Whether the target model is from Zhipu AI.
         
         Returns:
             API response as dictionary.
@@ -347,6 +361,15 @@ class OpenAIVisionLLM(BaseVisionLLM):
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        
+        # Zhipu AI specific adjustments
+        if is_zhipu:
+            # Zhipu might not support max_tokens parameter for some models or use different defaults
+            # Ensure stream is explicitly false if not using streaming
+            payload["stream"] = False
+            # Zhipu does not support max_tokens for vision models
+            if "max_tokens" in payload:
+                del payload["max_tokens"]
         
         try:
             with httpx.Client(timeout=60.0) as client:
