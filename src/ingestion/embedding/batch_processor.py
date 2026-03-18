@@ -13,7 +13,8 @@ Design Principles:
 
 from typing import List, Dict, Any, Optional, Tuple
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
 
 from src.core.types import Chunk
 from src.ingestion.embedding.dense_encoder import DenseEncoder
@@ -34,10 +35,12 @@ class BatchResult:
     """
     dense_vectors: List[List[float]]
     sparse_stats: List[Dict[str, Any]]
-    batch_count: int
-    total_time: float
-    successful_chunks: int
-    failed_chunks: int
+    summary_vectors: List[Optional[List[float]]] = field(default_factory=list)
+    hypothetical_vectors: List[Optional[List[float]]] = field(default_factory=list)
+    batch_count: int = 0
+    total_time: float = 0.0
+    successful_chunks: int = 0
+    failed_chunks: int = 0
 
 
 class BatchProcessor:
@@ -80,8 +83,9 @@ class BatchProcessor:
     def __init__(
         self,
         dense_encoder: DenseEncoder,
-        sparse_encoder: SparseEncoder,
+        sparse_encoder: Optional[SparseEncoder],
         batch_size: int = 100,
+        enable_sparse: bool = True,
     ):
         """Initialize BatchProcessor.
         
@@ -99,6 +103,9 @@ class BatchProcessor:
         self.dense_encoder = dense_encoder
         self.sparse_encoder = sparse_encoder
         self.batch_size = batch_size
+        self.enable_sparse = enable_sparse
+        if self.enable_sparse and self.sparse_encoder is None:
+            raise ValueError("sparse_encoder is required when enable_sparse is True")
     
     def process(
         self,
@@ -144,6 +151,8 @@ class BatchProcessor:
         # Process all batches
         dense_vectors: List[List[float]] = []
         sparse_stats: List[Dict[str, Any]] = []
+        summary_vectors: List[Optional[List[float]]] = []
+        hypothetical_vectors: List[Optional[List[float]]] = []
         successful_chunks = 0
         failed_chunks = 0
         
@@ -151,13 +160,17 @@ class BatchProcessor:
             batch_start = time.time()
             
             try:
-                # Dense encoding
-                batch_dense = self.dense_encoder.encode(batch, trace=trace)
+                (
+                    batch_dense,
+                    batch_summary_vectors,
+                    batch_hypothetical_vectors,
+                    batch_sparse,
+                ) = self._encode_batch_parallel(batch, trace)
                 dense_vectors.extend(batch_dense)
-                
-                # Sparse encoding
-                batch_sparse = self.sparse_encoder.encode(batch, trace=trace)
-                sparse_stats.extend(batch_sparse)
+                summary_vectors.extend(batch_summary_vectors)
+                hypothetical_vectors.extend(batch_hypothetical_vectors)
+                if batch_sparse:
+                    sparse_stats.extend(batch_sparse)
                 
                 successful_chunks += len(batch)
                 
@@ -202,10 +215,66 @@ class BatchProcessor:
         return BatchResult(
             dense_vectors=dense_vectors,
             sparse_stats=sparse_stats,
+            summary_vectors=summary_vectors,
+            hypothetical_vectors=hypothetical_vectors,
             batch_count=batch_count,
             total_time=total_time,
             successful_chunks=successful_chunks,
             failed_chunks=failed_chunks
+        )
+
+    def _encode_batch_parallel(
+        self,
+        batch: List[Chunk],
+        trace: Optional[Any],
+    ) -> Tuple[
+        List[List[float]],
+        List[Optional[List[float]]],
+        List[Optional[List[float]]],
+        List[Dict[str, Any]],
+    ]:
+        summary_texts = [c.metadata.get("summary", "") for c in batch]
+        question_texts = [" ".join(c.metadata.get("hypothetical_questions", [])) for c in batch]
+        supports_extra_texts = hasattr(self.dense_encoder, "encode_texts")
+        max_workers = 4 if self.enable_sparse else 3
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_dense = executor.submit(self.dense_encoder.encode, batch, trace=trace)
+            if supports_extra_texts:
+                future_summary = executor.submit(
+                    self.dense_encoder.encode_texts,
+                    summary_texts,
+                    trace=trace,
+                )
+                future_hypo = executor.submit(
+                    self.dense_encoder.encode_texts,
+                    question_texts,
+                    trace=trace,
+                )
+            else:
+                future_summary = None
+                future_hypo = None
+            sparse_encoder = self.sparse_encoder
+            if self.enable_sparse and sparse_encoder is None:
+                raise RuntimeError("sparse_encoder is required when sparse encoding is enabled")
+            if self.enable_sparse:
+                assert sparse_encoder is not None
+                future_sparse = executor.submit(sparse_encoder.encode, batch, trace=trace)
+            else:
+                future_sparse = None
+
+            batch_dense = future_dense.result()
+            if future_summary is not None and future_hypo is not None:
+                batch_summary_vectors = future_summary.result()
+                batch_hypothetical_vectors = future_hypo.result()
+            else:
+                batch_summary_vectors = [None for _ in batch]
+                batch_hypothetical_vectors = [None for _ in batch]
+            batch_sparse = future_sparse.result() if future_sparse is not None else []
+        return (
+            batch_dense,
+            batch_summary_vectors,
+            batch_hypothetical_vectors,
+            batch_sparse,
         )
     
     def _create_batches(self, chunks: List[Chunk]) -> List[List[Chunk]]:

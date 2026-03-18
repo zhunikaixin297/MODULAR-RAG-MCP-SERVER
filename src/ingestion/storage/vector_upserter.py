@@ -14,7 +14,9 @@ Design Principles:
 - Type-Safe: Full type hints and validation
 """
 
+import asyncio
 import hashlib
+import inspect
 from typing import List, Dict, Any, Optional
 
 from src.core.types import Chunk
@@ -65,9 +67,12 @@ class VectorUpserter:
             ValueError: If settings are invalid or vector store cannot be created.
         """
         self.settings = settings
+        self.collection_name = collection_name or getattr(
+            getattr(settings, "vector_store", None), "collection_name", None
+        )
         kwargs = {}
-        if collection_name:
-            kwargs['collection_name'] = collection_name
+        if self.collection_name:
+            kwargs['collection_name'] = self.collection_name
         self.vector_store = VectorStoreFactory.create(settings, **kwargs)
     
     def upsert(
@@ -75,6 +80,7 @@ class VectorUpserter:
         chunks: List[Chunk],
         vectors: List[List[float]],
         trace: Optional[Any] = None,
+        extra_vectors: Optional[Dict[str, List[Optional[List[float]]]]] = None,
     ) -> List[str]:
         """Upsert chunks with their vectors to vector store.
         
@@ -106,25 +112,34 @@ class VectorUpserter:
         if not chunks:
             raise ValueError("Cannot upsert empty chunks list")
         
+        if extra_vectors:
+            for key, values in extra_vectors.items():
+                if len(values) != len(chunks):
+                    raise ValueError(
+                        f"Extra vector count for {key} ({len(values)}) must match chunk count ({len(chunks)})"
+                    )
         # Generate stable chunk IDs and build records
         records = []
         chunk_ids = []
         
-        for chunk, vector in zip(chunks, vectors):
+        for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
             # Generate deterministic chunk ID
             chunk_id = self._generate_chunk_id(chunk)
             chunk_ids.append(chunk_id)
             
             # Build storage record
+            metadata = {
+                **chunk.metadata,
+                "text": chunk.text,
+                "chunk_id": chunk_id,
+            }
             record = {
                 "id": chunk_id,
                 "vector": vector,
-                "metadata": {
-                    **chunk.metadata,  # Preserve all original metadata
-                    "text": chunk.text,  # Store text for retrieval
-                    "chunk_id": chunk_id,  # Redundant but useful for queries
-                },
+                "metadata": metadata,
             }
+            if extra_vectors:
+                record["vectors"] = {key: extra_vectors[key][index] for key in extra_vectors}
             records.append(record)
         
         # Perform idempotent upsert
@@ -201,3 +216,15 @@ class VectorUpserter:
         
         # Single upsert operation
         return self.upsert(all_chunks, all_vectors, trace=trace)
+
+    def close(self) -> None:
+        close_fn = getattr(self.vector_store, "close", None)
+        if not callable(close_fn):
+            return
+        result = close_fn()
+        if inspect.iscoroutine(result):
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(result)
+            except RuntimeError:
+                asyncio.run(result)

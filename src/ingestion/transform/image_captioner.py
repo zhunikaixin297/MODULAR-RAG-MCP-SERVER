@@ -30,6 +30,33 @@ IMAGE_PLACEHOLDER_PATTERN = re.compile(r'\[IMAGE:\s*([^\]]+)\]')
 DEFAULT_MAX_WORKERS = 3  # Lower than text LLM due to higher cost/latency
 
 
+def inject_captions_into_text(text: str, image_captions: List[Dict[str, str]]) -> str:
+    if not image_captions:
+        return text
+    caption_map = {
+        entry.get("id"): entry.get("caption")
+        for entry in image_captions
+        if entry.get("id") and entry.get("caption")
+    }
+    if not caption_map:
+        return text
+    out = text
+    offset = 0
+    for match in IMAGE_PLACEHOLDER_PATTERN.finditer(text):
+        img_id = match.group(1).strip()
+        caption = caption_map.get(img_id)
+        if not caption:
+            continue
+        end = match.end() + offset
+        remaining_text = out[end:]
+        if remaining_text.strip().startswith("(Description:"):
+            continue
+        insertion = f"\n(Description: {caption})"
+        out = out[:end] + insertion + out[end:]
+        offset += len(insertion)
+    return out
+
+
 class ImageCaptioner(BaseTransform):
     """Generates captions for images referenced in chunks using Vision LLM.
     
@@ -94,7 +121,7 @@ class ImageCaptioner(BaseTransform):
         img_path: str, 
         trace: Optional[TraceContext] = None
     ) -> Optional[str]:
-        """Get caption for an image, using cache if available. Thread-safe.
+        """Get caption for an image, using cache. Thread-safe.
         
         Args:
             img_id: Image identifier
@@ -104,7 +131,7 @@ class ImageCaptioner(BaseTransform):
         Returns:
             Caption string or None if failed
         """
-        # Check cache first (thread-safe read)
+        # 1. Check cache (thread-safe read)
         with self._cache_lock:
             if img_id in self._caption_cache:
                 logger.debug(f"Caption cache hit for image {img_id}")
@@ -178,36 +205,26 @@ class ImageCaptioner(BaseTransform):
         if images_to_caption:
             self._generate_captions_parallel(images_to_caption, trace)
         
-        # Second pass: apply captions to chunks
+        # Second pass: collect captions per chunk (text injection is handled by pipeline merge step)
         processed_chunks = []
-        total_captions_added = 0
+        total_captions_collected = 0
         
         for chunk in chunks:
-            referenced_ids = self._find_referenced_image_ids(chunk.text)
-            
-            if not referenced_ids:
+            matches = list(IMAGE_PLACEHOLDER_PATTERN.finditer(chunk.text))
+            if not matches:
                 processed_chunks.append(chunk)
                 continue
             
-            new_text = chunk.text
             captions = []
             
-            for img_id in referenced_ids:
-                img_id_stripped = img_id.strip()
-                
-                # Get caption from cache (already populated by parallel processing)
+            for match in matches:
+                img_id = match.group(1).strip()
                 with self._cache_lock:
-                    caption = self._caption_cache.get(img_id_stripped)
+                    caption = self._caption_cache.get(img_id)
                 
                 if caption:
-                    captions.append({"id": img_id_stripped, "caption": caption})
-                    
-                    placeholder = f"[IMAGE: {img_id}]"
-                    replacement = f"[IMAGE: {img_id}]\n(Description: {caption})"
-                    new_text = new_text.replace(placeholder, replacement)
-                    total_captions_added += 1
-                    
-            chunk.text = new_text
+                    captions.append({"id": img_id, "caption": caption})
+                    total_captions_collected += 1
             
             if captions:
                 if "image_captions" not in chunk.metadata:
@@ -218,7 +235,7 @@ class ImageCaptioner(BaseTransform):
         
         with self._cache_lock:
             api_calls = len(self._caption_cache)
-        logger.info(f"Added {total_captions_added} captions, API calls: {api_calls}")
+        logger.info(f"Collected {total_captions_collected} captions, API calls: {api_calls}")
             
         return processed_chunks
     
