@@ -15,9 +15,14 @@ try:
     from src.libs.splitter.recursive_splitter import RecursiveSplitter
 except ImportError:
     RecursiveSplitter = None  # type: ignore[assignment, misc]
+try:
+    from src.libs.splitter.docling_splitter import DoclingSplitter
+except ImportError:
+    DoclingSplitter = None  # type: ignore[assignment, misc]
 
 __all__ = [
     "BaseSplitter",
     "SplitterFactory",
     "RecursiveSplitter",
+    "DoclingSplitter",
 ]

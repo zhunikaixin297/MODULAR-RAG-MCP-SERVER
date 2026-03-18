@@ -27,6 +27,11 @@ def _register_builtin_providers() -> None:
         SplitterFactory.register_provider("recursive", RecursiveSplitter)
     except ImportError:
         pass  # RecursiveSplitter not available (missing langchain dependency)
+    try:
+        from src.libs.splitter.semantic_markdown_splitter import SemanticMarkdownSplitter
+        SplitterFactory.register_provider("semantic_markdown", SemanticMarkdownSplitter)
+    except ImportError:
+        pass
 
 
 class SplitterFactory:
@@ -66,7 +71,7 @@ class SplitterFactory:
         """Create a Splitter instance based on configuration.
         
         Args:
-            settings: The application settings containing ingestion configuration.
+            settings: The application settings containing splitter configuration.
             **override_kwargs: Optional parameters to override config values.
         
         Returns:
@@ -76,14 +81,14 @@ class SplitterFactory:
             ValueError: If the configured provider is not supported or missing.
         """
         try:
-            ingestion_settings = settings.ingestion
-            if ingestion_settings is None:
-                raise AttributeError("settings.ingestion is None")
-            provider_name = ingestion_settings.splitter.lower()
+            splitter_settings = settings.splitter
+            if splitter_settings is None:
+                raise AttributeError("settings.splitter is None")
+            provider_name = splitter_settings.provider.lower()
         except AttributeError as e:
             raise ValueError(
-                "Missing required configuration: settings.ingestion.splitter. "
-                "Please ensure 'ingestion.splitter' is specified in settings.yaml"
+                "Missing required configuration: settings.splitter.provider. "
+                "Please ensure 'splitter.provider' is specified in settings.yaml"
             ) from e
         
         provider_class = cls._PROVIDERS.get(provider_name)
