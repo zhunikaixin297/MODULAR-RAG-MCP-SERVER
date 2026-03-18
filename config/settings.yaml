@@ -1,58 +1,58 @@
 # Modular RAG MCP Server - Configuration
-# This is the main configuration file for the MCP Server.
-# Edit this file to configure LLM, Embedding, VectorStore, and other services.
+# Configured for ZhiPu AI (via OpenAI compatibility) and Ollama Embedding
 
 # =============================================================================
-# LLM Configuration
+# LLM Configuration (ZhiPu AI)
 # =============================================================================
 llm:
-  provider: "openai"  # Options: openai, azure, ollama, deepseek
-  model: "gpt-4o"
-  deployment_name: "gpt-4o"
-  azure_endpoint: "https://YOUR_ENDPOINT.openai.azure.com/"
-  api_version: "2024-02-15-preview"
-  api_key: "YOUR_API_KEY_HERE"
-  temperature: 0.0
+  provider: "openai"  # Use OpenAI client for compatibility
+  model: "glm-4-flash"
+  base_url: "https://open.bigmodel.cn/api/paas/v4/"
+  api_key: "644b74f96dfefd0647b8c327cb8ddaf9.v2uYcYRqJ7mgUBJZ"  # Replace with your actual ZhiPu API Key
+  temperature: 0.1
   max_tokens: 4096
 
 # =============================================================================
 # Embedding Configuration
 # =============================================================================
 embedding:
-  provider: "openai"  # Options: openai, azure, ollama
-  model: "text-embedding-ada-002"
-  dimensions: 1536  # text-embedding-ada-002 固定维度 (不传递给API, 仅用于验证)
-  # Azure-compatible settings (azure_endpoint triggers Azure compat mode):
-  azure_endpoint: "https://YOUR_ENDPOINT.openai.azure.com/"
-  deployment_name: "text-embedding-ada-002"
-  api_version: "2024-02-15-preview"
-  api_key: "YOUR_API_KEY_HERE"
-  # OpenAI-specific settings (if provider is openai):
-  # api_key: "YOUR_API_KEY_HERE"
+  provider: "ollama"
+  model: "qwen3-embedding:4b"
+  base_url: "http://localhost:11434"
+  dimensions: 2560
 
 # =============================================================================
-# Vision LLM Configuration (for Image Captioning)
+# Vision LLM Configuration (ZhiPu AI)
 # =============================================================================
 vision_llm:
-  enabled: true  # Set to true to enable vision capabilities
-  provider: "openai"  # Options: openai, azure, ollama
-  model: "gpt-4o"  # Options: gpt-4o, gpt-4-vision-preview (OpenAI), llava (Ollama)
-  # Azure-compatible settings (azure_endpoint triggers Azure compat mode):
-  azure_endpoint: "https://YOUR_ENDPOINT.openai.azure.com/"
-  deployment_name: "gpt-4o"
-  api_version: "2024-02-15-preview"
-  api_key: "YOUR_API_KEY_HERE"
-  # Ollama-specific settings (if provider is ollama):
-  # base_url: "http://localhost:11434"
-  max_image_size: 2048  # Max dimension (width/height) for image compression
+  enabled: true
+  provider: "openai"  # Use OpenAI client for compatibility
+  model: "glm-4v-flash"
+  base_url: "https://open.bigmodel.cn/api/paas/v4/"
+  api_key: "644b74f96dfefd0647b8c327cb8ddaf9.v2uYcYRqJ7mgUBJZ"  # Replace with your actual ZhiPu API Key
+  max_image_size: 2048
 
 # =============================================================================
 # Vector Store Configuration
 # =============================================================================
 vector_store:
-  provider: "chroma"  # Options: chroma, qdrant, pinecone
-  persist_directory: "./data/db/chroma"
-  collection_name: "knowledge_hub"
+  provider: "opensearch"  # Options: chroma, opensearch
+  collection_name: "de"
+  persist_directory: "./data/db/chroma"  # For Chroma
+  
+  opensearch:
+    hosts:
+      - "http://localhost:9200"
+    username: "admin"
+    password: "admin"
+    use_ssl: false
+    verify_certs: false
+    index_name: "base"
+    timeout_seconds: 60
+    max_retries: 3
+    batch_size: 500
+    max_concurrency: 10
+    refresh: false
 
 # =============================================================================
 # Retrieval Configuration
@@ -67,21 +67,25 @@ retrieval:
 # Rerank Configuration
 # =============================================================================
 rerank:
-  enabled: false
-  provider: "none"  # Options: none, cross_encoder, llm
-  model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  enabled: true
+  provider: "tei"
+  model: "BAAI/bge-reranker-base"
   top_k: 5
+  base_url: "http://localhost:8082"
+  api_key: ""
+  timeout: 30
+  max_concurrency: 50
 
 # =============================================================================
 # Evaluation Configuration
 # =============================================================================
 evaluation:
-  enabled: false
+  enabled: true
   provider: "custom"  # Options: ragas, deepeval, custom
   metrics:
     - "hit_rate"
     - "mrr"
-    - "faithfulness"
+    # - "faithfulness"
 
 # =============================================================================
 # Observability Configuration
@@ -93,13 +97,12 @@ observability:
   structured_logging: true
 
 # =============================================================================
-# Ingestion Configuration
+# Ingestion Pipeline Configuration
 # =============================================================================
 ingestion:
-  chunk_size: 1000
-  chunk_overlap: 200
-  splitter: "recursive"  # Options: recursive, semantic, fixed_length
-  batch_size: 100
+  batch_size: 40
+  sparse_enabled: false
+  bm25_enabled: false
   
   # Chunk Refiner Configuration (C5)
   chunk_refiner:
@@ -110,3 +113,35 @@ ingestion:
   metadata_enricher:
     use_llm: true  # Set to true to enable LLM-based enrichment (requires LLM config)
     # When use_llm is false or LLM call fails, falls back to rule-based enrichment
+
+# =============================================================================
+# Loader Configuration
+# =============================================================================
+loader:
+  provider: "docling"  # Options: pdf, docling
+  docling:
+    general:
+      images_scale: 1.0
+      generate_picture_images: true
+      do_formula_recognition: true
+      do_table_enrichment: true
+      # do_pic_enrichment: false
+      do_ocr: true
+      accelerator_device: "CPU"
+      accelerator_num_threads: 4
+      max_concurrent_docs: 1
+      timeout_seconds: 300
+      image_output_dir: "./data/images"
+    vlm:
+      max_concurrency: 5
+    llm:
+      max_concurrency: 30
+
+# =============================================================================
+# Splitter Configuration
+# =============================================================================
+splitter:
+  provider: "semantic_markdown"  # Options: recursive, semantic_markdown
+  chunk_size: 1000
+  chunk_overlap: 200
+
