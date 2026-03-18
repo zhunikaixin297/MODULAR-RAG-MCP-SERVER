@@ -8,16 +8,18 @@
 
 **技术要点**：
 - 设计并实现"粗排召回 → 精排重排"两段式检索架构
-- 粗排阶段并行执行 Dense Retrieval（语义向量，Cosine Similarity）+ Sparse Retrieval（BM25 关键词匹配）
-- 通过 RRF（Reciprocal Rank Fusion）算法融合双路结果，平衡查准率与查全率
-- 精排阶段支持 Cross-Encoder 本地模型 / LLM Rerank / None 三种模式可插拔切换
+- 粗排阶段支持多路并发召回：
+  - 本地模式：Chroma Dense + BM25 Sparse
+  - 企业模式：OpenSearch 多字段联合检索（Content/Summary/Questions）
+- 通过 RRF（Reciprocal Rank Fusion）算法融合多路结果，平衡查准率与查全率
+- 精排阶段支持 TEI (Text Embeddings Inference) 加速的 Cross-Encoder 模型
 - 精排失败时自动回退至融合排名（Graceful Fallback），保障系统可用性
 
 **简历话术方向**：
-- "设计并实现了 Hybrid Search 混合检索引擎，结合 BM25 稀疏检索与 Dense Embedding 稠密检索，通过 RRF 融合算法实现查准率与查全率的平衡"
-- "引入 Cross-Encoder Rerank 精排模块，在不牺牲响应速度的前提下将 Top-K 检索精准度提升 XX%"
+- "设计并实现了 Hybrid Search 混合检索引擎，结合 OpenSearch 多字段检索与 RRF 融合算法，实现查准率与查全率的平衡"
+- "引入 TEI 推理加速的 Cross-Encoder Rerank 模块，将 Top-K 检索精准度提升 XX%，同时保持低延迟"
 
-**可量化角度**：Hit Rate@K、MRR、NDCG、Rerank 前后 Top-1 命中率变化、端到端查询延迟
+**可量化角度**：Hit Rate@K、MRR、NDCG、QPS、端到端查询延迟
 
 ---
 
@@ -28,14 +30,15 @@
 - 采用工厂模式（Factory Pattern）+ YAML 配置驱动，实现"改配置不改代码"的组件切换
 - LLM Provider 支持 Azure OpenAI / OpenAI / Ollama / DeepSeek 四种后端
 - Embedding 支持 OpenAI / Azure / Ollama 三种后端
-- 向量数据库接口预留扩展（当前默认 Chroma，可切换 Qdrant/Pinecone）
+- VectorStore 支持 Chroma（本地开发）与 OpenSearch（生产级高并发）无缝切换
+- Loader 支持 PyMuPDF（快速）与 Docling（高精度多模态）两种解析引擎
 - Vision LLM 独立抽象（BaseVisionLLM），支持多模态图像处理
 
 **简历话术方向**：
 - "设计了全链路可插拔架构，基于抽象接口 + 工厂模式 + 配置驱动，实现 LLM/Embedding/VectorStore 等 6 大核心组件的零代码热切换"
-- "架构支持 Azure OpenAI、本地 Ollama 等多种 Provider 无缝切换，满足企业合规与成本优化需求"
+- "架构支持 Chroma 本地开发与 OpenSearch 生产集群的无缝迁移，兼顾开发效率与企业级扩展性"
 
-**可量化角度**：支持 N 种 LLM Provider、N 种 Embedding 后端、配置切换零代码修改
+**可量化角度**：支持 N 种 LLM Provider、2 种向量数据库、配置切换零代码修改
 
 ---
 
@@ -43,37 +46,37 @@
 
 **技术要点**：
 - 自研五阶段流水线：Load → Split → Transform → Embed → Upsert
-- PDF 解析采用 MarkItDown 转 canonical Markdown，保留文档结构
-- 使用 LangChain RecursiveCharacterTextSplitter 进行语义感知切分
+- 集成 Docling 高精度解析引擎，精准识别文档层级结构（标题/段落/表格）与图片资源
+- 实现 SemanticMarkdownSplitter，基于文档标题层级进行语义化切分，保留逻辑完整性
 - Transform 阶段包含三个 LLM 增强步骤：
   - ChunkRefiner：LLM 驱动的 Chunk 智能重组与去噪
   - MetadataEnricher：自动生成 Title/Summary/Tags 语义元数据
   - ImageCaptioner：Vision LLM 生成图片描述，实现"搜文出图"
-- SHA256 文件哈希 + 内容哈希实现增量摄取与幂等 Upsert
-- 双路向量化：Dense（OpenAI Embedding）+ Sparse（BM25）并行编码
+- 引入 OpenSearch 异步批量写入（Async Bulk），配合 Semaphore 并发控制，吞吐量提升 XX 倍
+- 双路向量化：Dense（OpenAI Embedding）+ Sparse（BM25/OpenSearch）并行编码
 
 **简历话术方向**：
-- "设计并实现了五阶段智能数据摄取流水线，整合文档解析、语义切分、LLM 增强（智能重组/元数据注入/图片描述）、双路向量化与幂等存储"
-- "实现基于 SHA256 哈希的增量摄取机制，避免重复处理，降低 API 调用成本 XX%"
+- "设计并实现了五阶段智能数据摄取流水线，集成 Docling 高精度解析与语义化切分，显著提升文档结构识别率"
+- "引入 OpenSearch 异步批量写入机制，通过 asyncio 实现高并发数据摄取，解决海量文档写入瓶颈"
 
-**可量化角度**：处理文档数、生成 Chunk 数、增量摄取跳过率、LLM 增强覆盖率、端到端摄取耗时
+**可量化角度**：处理文档数、写入吞吐量（Docs/sec）、解析精准度提升、增量摄取跳过率
 
 ---
 
 ## 亮点 4：MCP 协议集成（Model Context Protocol）
 
 **技术要点**：
-- 遵循 MCP 标准（JSON-RPC 2.0 + Stdio Transport）实现知识检索 Server
+- 遵循 MCP 标准（JSON-RPC 2.0）实现知识检索 Server，支持 Stdio 与 SSE 双传输模式
 - 暴露 3 个标准 Tool：query_knowledge_hub / list_collections / get_document_summary
 - 支持 GitHub Copilot、Claude Desktop 等主流 MCP Client 即插即用
-- 返回格式支持 TextContent + ImageContent 多模态内容，含结构化 Citation 引用
-- Stdio Transport 零配置、零网络依赖，天然适合私有知识库场景
+- 实现基于 asyncio 的高并发请求处理，支持多模态内容返回（Text + Image）
+- Stdio 模式适合本地单机，SSE 模式适合远程部署与网关集成
 
 **简历话术方向**：
-- "基于 MCP（Model Context Protocol）标准实现知识检索 Server，支持 GitHub Copilot / Claude Desktop 等 AI Agent 直接调用私有知识库"
-- "实现引用透明的结构化响应（Citation），支持文本 + 图像多模态返回，增强 AI 输出的可信度"
+- "基于 MCP 标准构建企业级知识检索服务，支持 Stdio/SSE 双模传输，无缝对接 Claude Desktop 与 Copilot"
+- "实现多模态结构化响应（Citation + Image），提升 AI 助手在复杂图文场景下的回答可信度"
 
-**可量化角度**：支持 N 种 MCP Client、工具调用成功率、端到端响应延迟
+**可量化角度**：支持 Client 类型数、并发请求 QPS、首字节延迟 (TTFB)
 
 ---
 

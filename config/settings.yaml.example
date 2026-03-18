@@ -1,0 +1,148 @@
+# Modular RAG MCP Server - Enterprise Configuration (Example)
+# This is an enterprise-grade example configuration utilizing:
+# - LLM: DeepSeek / OpenAI / Azure / Ollama
+# - Embedding: BGE / OpenAI / Ollama
+# - Loader: Docling (High-precision document parsing)
+# - Splitter: Semantic Markdown (Structure-aware chunking)
+# - Vector Store: OpenSearch (High-concurrency distributed search)
+# - Reranker: TEI (Text Embeddings Inference for fast cross-encoding)
+
+# =============================================================================
+# LLM Configuration
+# =============================================================================
+llm:
+  provider: "openai"  # Options: openai, azure, ollama, deepseek
+  model: "gpt-4o-mini"
+  base_url: "https://api.openai.com/v1"
+  api_key: "${OPENAI_API_KEY}" # Read from environment variable
+  temperature: 0.1
+  max_tokens: 4096
+
+# =============================================================================
+# Embedding Configuration
+# =============================================================================
+embedding:
+  provider: "openai" # Options: openai, azure, ollama
+  model: "text-embedding-3-small"
+  dimensions: 1536
+  api_key: "${OPENAI_API_KEY}"
+
+# =============================================================================
+# Vision LLM Configuration
+# =============================================================================
+vision_llm:
+  enabled: true
+  provider: "openai" 
+  model: "gpt-4o"
+  api_key: "${OPENAI_API_KEY}"
+  max_image_size: 2048
+
+# =============================================================================
+# Vector Store Configuration
+# =============================================================================
+vector_store:
+  provider: "opensearch"  # Options: chroma, opensearch
+  collection_name: "enterprise_kb"
+  persist_directory: "./data/db/chroma"  # Fallback for Chroma
+  
+  # Enterprise OpenSearch Settings
+  opensearch:
+    hosts:
+      - "http://localhost:9200"
+    username: "admin"
+    password: "admin"
+    use_ssl: false
+    verify_certs: false
+    index_name: "enterprise_kb"
+    timeout_seconds: 60
+    max_retries: 3
+    batch_size: 500
+    max_concurrency: 20 # Limit async bulk concurrency
+    refresh: false
+
+# =============================================================================
+# Retrieval Configuration
+# =============================================================================
+retrieval:
+  dense_top_k: 30
+  sparse_top_k: 30
+  fusion_top_k: 15
+  rrf_k: 60  # RRF smoothing constant
+
+# =============================================================================
+# Rerank Configuration
+# =============================================================================
+rerank:
+  enabled: true
+  provider: "tei" # Options: tei, cross_encoder, llm, none
+  model: "BAAI/bge-reranker-base"
+  top_k: 5
+  base_url: "http://localhost:8082" # TEI service endpoint
+  api_key: ""
+  timeout: 30
+  max_concurrency: 50
+
+# =============================================================================
+# Evaluation Configuration
+# =============================================================================
+evaluation:
+  enabled: true
+  provider: "ragas"  # Options: ragas, deepeval, custom
+  metrics:
+    - "hit_rate"
+    - "mrr"
+    - "faithfulness"
+    - "answer_relevancy"
+
+# =============================================================================
+# Observability Configuration
+# =============================================================================
+observability:
+  log_level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
+  trace_enabled: true
+  trace_file: "./logs/traces.jsonl"
+  structured_logging: true
+
+# =============================================================================
+# Ingestion Pipeline Configuration
+# =============================================================================
+ingestion:
+  batch_size: 100
+  sparse_enabled: true # Enabled for OpenSearch multi-channel retrieval
+  bm25_enabled: false  # Use OpenSearch match query instead of local BM25
+  
+  chunk_refiner:
+    use_llm: true  # LLM-based chunk semantic boundary repair
+  
+  metadata_enricher:
+    use_llm: true  # Generate Title/Summary/Tags for enhanced filtering
+
+# =============================================================================
+# Loader Configuration
+# =============================================================================
+loader:
+  provider: "docling"  # Options: pdf (PyMuPDF), docling (High Precision VLM)
+  docling:
+    general:
+      images_scale: 1.0
+      generate_picture_images: true
+      do_formula_recognition: true
+      do_table_enrichment: true
+      do_ocr: true
+      accelerator_device: "CPU" # Can be set to "CUDA" or "MPS"
+      accelerator_num_threads: 8
+      max_concurrent_docs: 2
+      timeout_seconds: 600
+      image_output_dir: "./data/images"
+    vlm:
+      max_concurrency: 5
+    llm:
+      max_concurrency: 20
+
+# =============================================================================
+# Splitter Configuration
+# =============================================================================
+splitter:
+  provider: "semantic_markdown"  # Options: recursive, semantic_markdown
+  chunk_size: 1000
+  chunk_overlap: 200
