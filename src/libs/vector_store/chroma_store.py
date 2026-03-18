@@ -335,45 +335,118 @@ class ChromaStore(BaseVectorStore):
 
     def delete_by_metadata(
         self,
-        filter_dict: Dict[str, Any],
+        filters: Dict[str, Any],
         trace: Optional[Any] = None,
+        **kwargs: Any,
     ) -> int:
         """Delete records matching a metadata filter.
 
         Args:
-            filter_dict: Metadata key/value pairs to match
+            filters: Metadata key/value pairs to match
                 (e.g. ``{"source_hash": "abc123"}``).
             trace: Optional TraceContext for observability.
+            **kwargs: Provider-specific parameters.
 
         Returns:
             Number of records deleted.
 
         Raises:
-            ValueError: If *filter_dict* is empty.
+            ValueError: If *filters* is empty.
             RuntimeError: If the operation fails.
         """
-        if not filter_dict:
-            raise ValueError("filter_dict cannot be empty")
+        if not filters:
+            raise ValueError("filters cannot be empty")
 
         try:
-            where = self._build_where_clause(filter_dict)
+            where = self._build_where_clause(filters)
             # Query matching IDs first
             results = self.collection.get(where=where, include=[])
             matching_ids = results.get("ids", [])
 
             if not matching_ids:
-                logger.debug(f"delete_by_metadata: no records matched {filter_dict}")
+                logger.debug(f"delete_by_metadata: no records matched {filters}")
                 return 0
 
             self.collection.delete(ids=matching_ids)
             logger.info(
                 f"delete_by_metadata: deleted {len(matching_ids)} records "
-                f"matching {filter_dict}"
+                f"matching {filters}"
             )
             return len(matching_ids)
         except Exception as e:
             raise RuntimeError(
-                f"Failed to delete by metadata {filter_dict}: {e}"
+                f"Failed to delete by metadata {filters}: {e}"
+            ) from e
+
+    def get_ids_by_metadata(
+        self,
+        filters: Dict[str, Any],
+        trace: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> List[str]:
+        """Retrieve record IDs from the vector store by metadata filters."""
+        if not filters:
+            raise ValueError("filters cannot be empty")
+
+        try:
+            where = self._build_where_clause(filters)
+            results = self.collection.get(where=where, include=[])
+            return results.get("ids", [])
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to get IDs by metadata {filters}: {e}"
+            ) from e
+
+    def count_by_metadata(
+        self,
+        filters: Dict[str, Any],
+        trace: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> int:
+        """Count records in the vector store by metadata filters."""
+        if not filters:
+            raise ValueError("filters cannot be empty")
+
+        try:
+            where = self._build_where_clause(filters)
+            results = self.collection.get(where=where, include=[])
+            return len(results.get("ids", []))
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to count by metadata {filters}: {e}"
+            ) from e
+
+    def get_by_metadata(
+        self,
+        filters: Dict[str, Any],
+        trace: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve records from the vector store by metadata filters."""
+        if not filters:
+            raise ValueError("filters cannot be empty")
+
+        try:
+            where = self._build_where_clause(filters)
+            results = self.collection.get(
+                where=where, include=["documents", "metadatas"]
+            )
+            
+            output = []
+            ids = results.get("ids", [])
+            docs = results.get("documents", [])
+            metas = results.get("metadatas", [])
+            
+            for i, cid in enumerate(ids):
+                output.append({
+                    "id": cid,
+                    "text": docs[i] if docs else "",
+                    "metadata": metas[i] if metas else {},
+                })
+            return output
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to get records by metadata {filters}: {e}"
             ) from e
     
     def _sanitize_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
@@ -447,6 +520,16 @@ class ChromaStore(BaseVectorStore):
             'name': self.collection_name,
             'metadata': self.collection.metadata
         }
+
+    def keyword_search(
+        self,
+        query_text: str,
+        top_k: int = 10,
+        filters: Optional[Dict[str, Any]] = None,
+        trace: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
+        raise NotImplementedError("ChromaStore does not support keyword_search()")
     
     def get_by_ids(
         self,

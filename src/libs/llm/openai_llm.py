@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from typing import Any, Dict, List, Optional
+import httpx
 
 from src.libs.llm.base_llm import BaseLLM, ChatResponse, Message
 
@@ -80,9 +81,13 @@ class OpenAILLM(BaseLLM):
         # Azure-compatible mode detection
         azure_endpoint = getattr(settings.llm, 'azure_endpoint', None)
         self.api_version = getattr(settings.llm, 'api_version', None)
+        settings_base_url = getattr(settings.llm, 'base_url', None)
         
         if base_url:
             self.base_url = base_url
+            self._use_azure_auth = False
+        elif settings_base_url:
+            self.base_url = settings_base_url
             self._use_azure_auth = False
         elif azure_endpoint:
             # Azure-compatible mode: construct deployment-based URL
@@ -97,6 +102,7 @@ class OpenAILLM(BaseLLM):
         
         # Store any additional kwargs for future use
         self._extra_config = kwargs
+        self._http_client: Optional[httpx.Client] = None
     
     def chat(
         self,
@@ -182,8 +188,6 @@ class OpenAILLM(BaseLLM):
         Raises:
             OpenAILLMError: If the API call fails.
         """
-        import httpx
-        
         url = f"{self.base_url.rstrip('/')}/chat/completions"
         if self.api_version:
             url += f"?api-version={self.api_version}"
@@ -206,16 +210,15 @@ class OpenAILLM(BaseLLM):
         }
         
         try:
-            with httpx.Client(timeout=60.0) as client:
-                response = client.post(url, json=payload, headers=headers)
-                
-                if response.status_code != 200:
-                    error_detail = self._parse_error_response(response)
-                    raise OpenAILLMError(
-                        f"[OpenAI] API error (HTTP {response.status_code}): {error_detail}"
-                    )
-                
-                return response.json()
+            if self._http_client is None:
+                self._http_client = httpx.Client(timeout=60.0)
+            response = self._http_client.post(url, json=payload, headers=headers)
+            if response.status_code != 200:
+                error_detail = self._parse_error_response(response)
+                raise OpenAILLMError(
+                    f"[OpenAI] API error (HTTP {response.status_code}): {error_detail}"
+                )
+            return response.json()
         except httpx.TimeoutException as e:
             raise OpenAILLMError(
                 f"[OpenAI] Request timed out after 60 seconds"
@@ -244,3 +247,8 @@ class OpenAILLM(BaseLLM):
             return response.text
         except Exception:
             return response.text or "Unknown error"
+
+    def close(self) -> None:
+        if self._http_client is not None:
+            self._http_client.close()
+            self._http_client = None

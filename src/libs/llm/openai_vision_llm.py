@@ -15,6 +15,7 @@ import io
 import os
 from pathlib import Path
 from typing import Any, Optional
+import httpx
 
 from src.libs.llm.base_llm import ChatResponse, Message
 from src.libs.llm.base_vision_llm import BaseVisionLLM, ImageInput
@@ -121,6 +122,13 @@ class OpenAIVisionLLM(BaseVisionLLM):
         
         self._use_azure_auth = False
         
+        # Check settings for base_url if not provided explicitly
+        if not base_url:
+            if vision_settings:
+                base_url = getattr(vision_settings, 'base_url', None)
+            if not base_url:
+                base_url = getattr(settings.llm, 'base_url', None)
+
         if base_url:
             self.base_url = base_url
         elif azure_endpoint:
@@ -135,6 +143,7 @@ class OpenAIVisionLLM(BaseVisionLLM):
             self.base_url = self.DEFAULT_BASE_URL
         
         self._extra_config = kwargs
+        self._http_client: Optional[httpx.Client] = None
     
     def chat_with_image(
         self,
@@ -183,6 +192,7 @@ class OpenAIVisionLLM(BaseVisionLLM):
             api_messages.extend([{"role": m.role, "content": m.content} for m in messages])
         
         # Add current text + image message
+        # For Zhipu AI compatibility: ensure text object is first, then image object
         current_message = {
             "role": "user",
             "content": [
@@ -193,7 +203,7 @@ class OpenAIVisionLLM(BaseVisionLLM):
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:{processed_image.mime_type};base64,{image_base64}"
+                        "url": f"{image_base64}" if image_base64.startswith("http") else f"data:{processed_image.mime_type};base64,{image_base64}"
                     }
                 }
             ]
@@ -202,10 +212,14 @@ class OpenAIVisionLLM(BaseVisionLLM):
         
         # Make API call
         try:
+            # Check if this is a Zhipu AI model to adjust parameters if needed
+            is_zhipu = "glm" in self.model.lower()
+            
             response_data = self._call_api(
                 messages=api_messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                is_zhipu=is_zhipu
             )
             
             content = response_data["choices"][0]["message"]["content"]
@@ -310,6 +324,7 @@ class OpenAIVisionLLM(BaseVisionLLM):
         messages: list[dict],
         temperature: float,
         max_tokens: int,
+        is_zhipu: bool = False,
     ) -> dict:
         """Make HTTP request to the Vision API.
         
@@ -317,6 +332,7 @@ class OpenAIVisionLLM(BaseVisionLLM):
             messages: List of API-formatted messages.
             temperature: Generation temperature.
             max_tokens: Maximum tokens to generate.
+            is_zhipu: Whether the target model is from Zhipu AI.
         
         Returns:
             API response as dictionary.
@@ -324,8 +340,6 @@ class OpenAIVisionLLM(BaseVisionLLM):
         Raises:
             OpenAIVisionLLMError: If API call fails.
         """
-        import httpx
-        
         url = f"{self.base_url.rstrip('/')}/chat/completions"
         if self.api_version:
             url += f"?api-version={self.api_version}"
@@ -348,17 +362,25 @@ class OpenAIVisionLLM(BaseVisionLLM):
             "max_tokens": max_tokens,
         }
         
+        # Zhipu AI specific adjustments
+        if is_zhipu:
+            # Zhipu might not support max_tokens parameter for some models or use different defaults
+            # Ensure stream is explicitly false if not using streaming
+            payload["stream"] = False
+            # Zhipu does not support max_tokens for vision models
+            if "max_tokens" in payload:
+                del payload["max_tokens"]
+        
         try:
-            with httpx.Client(timeout=60.0) as client:
-                response = client.post(url, json=payload, headers=headers)
-                
-                if response.status_code != 200:
-                    error_detail = self._parse_error_response(response)
-                    raise OpenAIVisionLLMError(
-                        f"[OpenAI Vision] API error (HTTP {response.status_code}): {error_detail}"
-                    )
-                
-                return response.json()
+            if self._http_client is None:
+                self._http_client = httpx.Client(timeout=60.0)
+            response = self._http_client.post(url, json=payload, headers=headers)
+            if response.status_code != 200:
+                error_detail = self._parse_error_response(response)
+                raise OpenAIVisionLLMError(
+                    f"[OpenAI Vision] API error (HTTP {response.status_code}): {error_detail}"
+                )
+            return response.json()
         except httpx.TimeoutException as e:
             raise OpenAIVisionLLMError(
                 "[OpenAI Vision] Request timed out after 60 seconds"
@@ -380,3 +402,8 @@ class OpenAIVisionLLM(BaseVisionLLM):
             return response.text
         except Exception:
             return response.text or "Unknown error"
+
+    def close(self) -> None:
+        if self._http_client is not None:
+            self._http_client.close()
+            self._http_client = None

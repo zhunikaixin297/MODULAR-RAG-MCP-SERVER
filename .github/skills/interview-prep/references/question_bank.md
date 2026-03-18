@@ -106,23 +106,23 @@
 > 3. 按 `[DICE]` 选主题组（1→A, 2→B, 3→C, 4→D, 5→E, 6→F），再从该组中选第 `[DICE]` 道题
 > 4. 严禁与同会话上场面试重复超过 1 题
 
-### 【A — 检索架构】关键词：Hybrid Search / RRF / BM25 / 向量检索 / 混合检索
+### 【A — 检索架构】关键词：Hybrid Search / RRF / OpenSearch / 向量检索 / 混合检索
 
 A1. RRF 公式是什么？k 值怎么选？为什么不用线性加权？
-A2. BM25 相比 TF-IDF 改进了什么？BM25 里的 b 参数和 k1 参数各控制什么？
+A2. 在 OpenSearch 下，Hybrid Search 是怎么实现的？如何结合多路向量（Content/Summary）？
 A3. IDF 里的文档频率存在哪里？重新摄取文档时怎么更新 BM25 索引？
 A4. 向量检索用的是 Cosine Similarity，为什么不用欧式距离？它们在归一化向量上有什么区别？
 A5. 如果用户查询全是专有名词（如产品代号），纯向量检索会有什么问题？你们怎么解决的？
 A6. Top-K 的 K 怎么定？召回太少和召回太多分别会有什么影响？
 A7. Hybrid Search 里 Dense 和 Sparse 两路的召回数量一样吗？如果不一样，RRF 还有效吗？
 A8. 如果两路检索结果完全不重叠，RRF 融合后会是什么结果？这是好事还是坏事？
-A9. 向量检索的相似度阈值你们设了吗？设阈值有什么风险？
+A9. OpenSearch 的 script_score 你们怎么用的？为什么不直接用 bool query？
 A10. BM25 对中文分词有什么依赖？不做分词处理会有什么问题？
 
-### 【B — 精排 Reranker】关键词：Rerank / Cross-Encoder / 精排 / 二阶段检索
+### 【B — 精排 Reranker】关键词：Rerank / TEI / Cross-Encoder / 精排 / 二阶段检索
 
 B1. Cross-Encoder 和 Bi-Encoder 的区别？为什么 Cross-Encoder 不能做粗排召回？
-B2. 精排候选集多大合适？K 开太大会有什么问题？
+B2. TEI (Text Embeddings Inference) 是什么？它相比原生 Python 推理有什么性能优势？
 B3. LLM Rerank 相比 Cross-Encoder 有什么优劣？什么场景下你会选 LLM Rerank？
 B4. 精排失败时系统怎么降级？Graceful Fallback 是在哪里实现的，用的什么机制？
 B5. Cross-Encoder 推理时输入是什么格式？Query 和 Chunk 是怎么拼接的？
@@ -130,28 +130,28 @@ B6. 如果 Reranker 模型在语言上有偏差（如英文模型处理中文）
 B7. 精排后分数低于某个阈值的 chunk 会被过滤掉吗？有没有这个机制？
 B8. 你们使用的具体是哪个 Cross-Encoder 模型？选它的理由是什么？
 
-### 【C — 数据摄取 Ingestion】关键词：Ingestion / Pipeline / ChunkRefiner / Metadata / 摄取流水线
+### 【C — 数据摄取 Ingestion】关键词：Ingestion / Pipeline / Docling / Semantic Splitter / OpenSearch
 
 C1. ChunkRefiner 做了什么？为什么不直接调 Splitter 参数而要用 LLM？
 C2. MetadataEnricher 产出的 Title/Summary/Tags 存在哪里？检索时有用到吗？怎么用的？
 C3. SHA256 文件去重和 chunk_id 哈希去重各自防的是什么场景？为什么要双重保险？
 C4. Embed 阶段的"差量计算"是怎么做的？未变更 chunk 怎么识别并跳过 API 调用？
 C5. 图片 Caption 是怎么进检索链路的？用户命中图片 chunk 后，图片怎么返回给用户？
-C6. PDF 解析用的什么库？MarkItDown 转换的结果格式是什么？有没有遇到过图表或复杂排版的问题？
-C7. RecursiveCharacterTextSplitter 是按什么规则切分的？chunk_overlap 的作用是什么？
+C6. Docling 解析器相比 PyMuPDF 有什么优势？它是如何识别文档层级结构的？
+C7. SemanticMarkdownSplitter 的切分逻辑是什么？当一个 H2 章节过长时它会怎么处理？
 C8. Transform 阶段的三个步骤（ChunkRefiner / MetadataEnricher / ImageCaptioner）是并行执行还是串行？为什么？
-C9. 如果 LLM 增强步骤失败了（如 ChunkRefiner 调用超时），整个摄取任务会怎么处理？
+C9. OpenSearch 的 Async Bulk 写入是怎么实现的？为什么要用 Semaphore 控制并发？
 C10. 如果发现源文件更新了，怎么做增量更新？直接重跑现有逻辑会有什么问题？
 C11. chunk_index 和 start_offset 这两个字段是用来做什么的？检索时用到了吗？
 C12. ImageCaptioner 用的是什么 Vision 模型？如果图片是表格或代码截图，Caption 效果怎么样？
 
-### 【D — 架构 & MCP 协议】关键词：可插拔 / 工厂模式 / MCP / 插件架构
+### 【D — 架构 & MCP 协议】关键词：可插拔 / 工厂模式 / MCP / SSE / 异步并发
 
 D1. 可插拔架构怎么实现的？新增一个 Embedding Provider 需要改哪些文件？
 D2. `query_knowledge_hub` 这个 MCP tool 的输入输出格式是什么？Citation 结构包含哪些字段？
-D3. MCP 用的是什么传输协议？Stdio Transport 和 HTTP Transport 有什么区别？
+D3. MCP 支持哪两种 Transport？SSE 和 Stdio 各自的优缺点是什么？
 D4. 如果要横向扩展这个系统支持多租户，你觉得哪里需要改动？最难的点是什么？
-D5. 工厂模式里，注册新 Provider 的映射关系存在哪里？是硬编码还是动态注册？
+D5. MCP Server 是如何处理高并发请求的？Python 的 asyncio 和 run_in_executor 是怎么配合的？
 D6. MCP 的 `list_collections` 和 `get_document_summary` 这两个工具各自什么场景下被 Client 调用？
 D7. 如果 MCP Client 传来一个不存在的 collection 名，系统怎么处理？有没有参数校验？
 D8. Base 抽象类里定义了哪些必须实现的接口方法？有没有带默认实现的方法？

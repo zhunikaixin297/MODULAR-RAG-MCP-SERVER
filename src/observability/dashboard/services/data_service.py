@@ -25,6 +25,8 @@ class DataService:
         self._manager: Any = None
         self._chroma: Any = None
         self._images: Any = None
+        self._integrity: Any = None
+        self._provider: str = "chroma"
         self._current_collection: str = ""
 
     # ------------------------------------------------------------------
@@ -56,6 +58,7 @@ class DataService:
         from src.libs.vector_store.vector_store_factory import VectorStoreFactory
 
         settings = load_settings()
+        self._provider = str(getattr(settings.vector_store, "provider", "chroma")).lower()
 
         chroma = VectorStoreFactory.create(
             settings, collection_name=target_collection
@@ -71,6 +74,7 @@ class DataService:
 
         self._chroma = chroma
         self._images = images
+        self._integrity = integrity
         self._manager = DocumentManager(chroma, bm25, images, integrity)
         self._current_collection = target_collection
 
@@ -79,16 +83,30 @@ class DataService:
     # ------------------------------------------------------------------
 
     def list_collections(self) -> List[str]:
-        """Return all available ChromaDB collection names."""
+        """Return all available collection names."""
         try:
-            from src.core.settings import load_settings, resolve_path
+            from src.core.settings import load_settings
+
+            settings = load_settings()
+            provider = str(getattr(settings.vector_store, "provider", "chroma")).lower()
+            if provider == "opensearch":
+                self._ensure_stores()
+                payload = self._chroma._run_async(
+                    self._chroma.client.cat.indices(format="json")
+                )
+                names = []
+                for item in payload:
+                    index_name = item.get("index", "")
+                    if not index_name or index_name.startswith("."):
+                        continue
+                    names.append(index_name)
+                return sorted(set(names))
+
+            from src.core.settings import resolve_path
             import chromadb
             from chromadb.config import Settings as ChromaSettings
 
-            settings = load_settings()
-            persist_dir = str(
-                resolve_path(settings.vector_store.persist_directory)
-            )
+            persist_dir = str(resolve_path(settings.vector_store.persist_directory))
             client = chromadb.PersistentClient(
                 path=persist_dir,
                 settings=ChromaSettings(anonymized_telemetry=False, allow_reset=True),
@@ -108,7 +126,6 @@ class DataService:
         """
         self._ensure_stores(collection)
         from dataclasses import asdict
-
         docs = self._manager.list_documents(collection)
         return [asdict(d) for d in docs]
 
@@ -127,29 +144,13 @@ class DataService:
     def get_chunks(
         self, source_hash: str, collection: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Return chunk records from ChromaDB matching *source_hash*.
+        """Return chunk records from the vector store matching *source_hash*.
 
         Each dict has keys: id, text, metadata.
         """
         self._ensure_stores(collection)
         try:
-            results = self._chroma.collection.get(
-                where={"doc_hash": source_hash},
-                include=["documents", "metadatas"],
-            )
-            chunks: List[Dict[str, Any]] = []
-            ids = results.get("ids", [])
-            docs = results.get("documents", [])
-            metas = results.get("metadatas", [])
-            for i, cid in enumerate(ids):
-                chunks.append(
-                    {
-                        "id": cid,
-                        "text": docs[i] if docs else "",
-                        "metadata": metas[i] if metas else {},
-                    }
-                )
-            return chunks
+            return self._chroma.get_by_metadata({"doc_hash": source_hash})
         except Exception as exc:
             logger.warning("Failed to get chunks for %s: %s", source_hash, exc)
             return []
@@ -199,8 +200,6 @@ class DataService:
         """
         import shutil
         from src.core.settings import load_settings, resolve_path
-        import chromadb
-        from chromadb.config import Settings as ChromaSettings
 
         summary: Dict[str, Any] = {
             "collections_deleted": 0,
@@ -213,19 +212,35 @@ class DataService:
 
         settings = load_settings()
 
-        # 1. Delete all ChromaDB collections
+        provider = str(getattr(settings.vector_store, "provider", "chroma")).lower()
+
+        # 1. Delete all vector-store collections / indices
         try:
-            persist_dir = str(resolve_path(settings.vector_store.persist_directory))
-            client = chromadb.PersistentClient(
-                path=persist_dir,
-                settings=ChromaSettings(anonymized_telemetry=False, allow_reset=True),
-            )
-            colls = client.list_collections()
-            for c in colls:
-                client.delete_collection(c.name)
-                summary["collections_deleted"] += 1
+            if provider == "opensearch":
+                self._ensure_stores()
+                indices = self._chroma._run_async(
+                    self._chroma.client.cat.indices(format="json")
+                )
+                for item in indices:
+                    index_name = item.get("index", "")
+                    if not index_name or index_name.startswith("."):
+                        continue
+                    self._chroma._run_async(self._chroma.client.indices.delete(index=index_name))
+                    summary["collections_deleted"] += 1
+            else:
+                import chromadb
+                from chromadb.config import Settings as ChromaSettings
+                persist_dir = str(resolve_path(settings.vector_store.persist_directory))
+                client = chromadb.PersistentClient(
+                    path=persist_dir,
+                    settings=ChromaSettings(anonymized_telemetry=False, allow_reset=True),
+                )
+                colls = client.list_collections()
+                for c in colls:
+                    client.delete_collection(c.name)
+                    summary["collections_deleted"] += 1
         except Exception as exc:
-            summary["errors"].append(f"ChromaDB: {exc}")
+            summary["errors"].append(f"VectorStore: {exc}")
 
         # 2. Clear BM25 indexes (remove entire bm25 directory)
         try:

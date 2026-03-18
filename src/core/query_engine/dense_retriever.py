@@ -164,6 +164,35 @@ class DenseRetriever:
         
         logger.debug(f"Retrieved {len(results)} results for query")
         return results
+
+    def retrieve_by_field(
+        self,
+        query: str,
+        vector_field: str,
+        top_k: Optional[int] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        trace: Optional[Any] = None,
+    ) -> List[RetrievalResult]:
+        self._validate_query(query)
+        self._validate_dependencies()
+        if not vector_field:
+            raise ValueError("vector_field cannot be empty")
+        effective_top_k = top_k if top_k is not None else self.default_top_k
+        try:
+            query_vectors = self.embedding_client.embed([query], trace=trace)
+            query_vector = query_vectors[0]
+            raw_results = self.vector_store.query(
+                vector=query_vector,
+                top_k=effective_top_k,
+                filters=filters,
+                trace=trace,
+                vector_field=vector_field,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to query vector store for field {vector_field}: {e}"
+            ) from e
+        return self._transform_results(raw_results)
     
     def _validate_query(self, query: str) -> None:
         """Validate the query string.

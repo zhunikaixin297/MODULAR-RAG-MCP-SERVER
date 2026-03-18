@@ -146,6 +146,7 @@ class TestEmbeddingFactory:
     def setup_method(self):
         """Reset factory registry before each test."""
         EmbeddingFactory._PROVIDERS.clear()
+        EmbeddingFactory._INSTANCES.clear()
     
     def test_register_provider_success(self):
         """Registering valid provider should succeed."""
@@ -211,6 +212,23 @@ class TestEmbeddingFactory:
         
         embedding = EmbeddingFactory.create(settings, dimension=1024)
         assert embedding.dimension == 1024
+
+    def test_create_returns_cached_instance_for_same_config(self):
+        EmbeddingFactory.register_provider("fake", FakeEmbedding)
+
+        settings = MagicMock()
+        settings.embedding.provider = "fake"
+        settings.embedding.model = "mock-model"
+        settings.embedding.base_url = "http://localhost"
+        settings.embedding.azure_endpoint = None
+        settings.embedding.deployment_name = None
+        settings.embedding.api_version = None
+        settings.embedding.dimensions = 384
+
+        instance_a = EmbeddingFactory.create(settings)
+        instance_b = EmbeddingFactory.create(settings)
+
+        assert instance_a is instance_b
     
     def test_create_unknown_provider(self):
         """Creating unregistered provider should raise clear error."""

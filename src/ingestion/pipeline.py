@@ -19,6 +19,8 @@ Design Principles:
 from pathlib import Path
 from typing import Callable, List, Optional, Dict, Any
 import time
+import copy
+from concurrent.futures import ThreadPoolExecutor
 
 from src.core.settings import Settings, load_settings, resolve_path
 from src.core.types import Document, Chunk
@@ -27,7 +29,7 @@ from src.observability.logger import get_logger
 
 # Libs layer imports
 from src.libs.loader.file_integrity import SQLiteIntegrityChecker
-from src.libs.loader.pdf_loader import PdfLoader
+from src.libs.loader.loader_factory import LoaderFactory
 from src.libs.embedding.embedding_factory import EmbeddingFactory
 from src.libs.vector_store.vector_store_factory import VectorStoreFactory
 
@@ -35,7 +37,7 @@ from src.libs.vector_store.vector_store_factory import VectorStoreFactory
 from src.ingestion.chunking.document_chunker import DocumentChunker
 from src.ingestion.transform.chunk_refiner import ChunkRefiner
 from src.ingestion.transform.metadata_enricher import MetadataEnricher
-from src.ingestion.transform.image_captioner import ImageCaptioner
+from src.ingestion.transform.image_captioner import ImageCaptioner, inject_captions_into_text
 from src.ingestion.embedding.dense_encoder import DenseEncoder
 from src.ingestion.embedding.sparse_encoder import SparseEncoder
 from src.ingestion.embedding.batch_processor import BatchProcessor
@@ -142,11 +144,12 @@ class IngestionPipeline:
         logger.info("  ✓ FileIntegrityChecker initialized")
         
         # Stage 2: Loader
-        self.loader = PdfLoader(
+        self.loader = LoaderFactory.create(
+            settings,
             extract_images=True,
             image_storage_dir=str(resolve_path(f"data/images/{collection}"))
         )
-        logger.info("  ✓ PdfLoader initialized")
+        logger.info("  ✓ Loader initialized")
         
         # Stage 3: Chunker
         self.chunker = DocumentChunker(settings)
@@ -166,16 +169,19 @@ class IngestionPipeline:
         # Stage 5: Encoders
         embedding = EmbeddingFactory.create(settings)
         batch_size = settings.ingestion.batch_size if settings.ingestion else 100
+        sparse_enabled = settings.ingestion.sparse_enabled if settings.ingestion else True
+        bm25_enabled = settings.ingestion.bm25_enabled if settings.ingestion else True
         self.dense_encoder = DenseEncoder(embedding, batch_size=batch_size)
         logger.info(f"  ✓ DenseEncoder initialized (provider={settings.embedding.provider})")
         
-        self.sparse_encoder = SparseEncoder()
-        logger.info("  ✓ SparseEncoder initialized")
+        self.sparse_encoder = SparseEncoder() if sparse_enabled else None
+        logger.info(f"  ✓ SparseEncoder initialized (enabled={sparse_enabled})")
         
         self.batch_processor = BatchProcessor(
             dense_encoder=self.dense_encoder,
             sparse_encoder=self.sparse_encoder,
-            batch_size=batch_size
+            batch_size=batch_size,
+            enable_sparse=sparse_enabled
         )
         logger.info(f"  ✓ BatchProcessor initialized (batch_size={batch_size})")
         
@@ -183,8 +189,8 @@ class IngestionPipeline:
         self.vector_upserter = VectorUpserter(settings, collection_name=collection)
         logger.info(f"  ✓ VectorUpserter initialized (provider={settings.vector_store.provider}, collection={collection})")
         
-        self.bm25_indexer = BM25Indexer(index_dir=str(resolve_path(f"data/db/bm25/{collection}")))
-        logger.info("  ✓ BM25Indexer initialized")
+        self.bm25_indexer = BM25Indexer(index_dir=str(resolve_path(f"data/db/bm25/{collection}"))) if bm25_enabled else None
+        logger.info(f"  ✓ BM25Indexer initialized (enabled={bm25_enabled})")
         
         self.image_storage = ImageStorage(
             db_path=str(resolve_path("data/db/image_index.db")),
@@ -236,7 +242,7 @@ class IngestionPipeline:
             file_hash = self.integrity_checker.compute_sha256(str(file_path))
             logger.info(f"  File hash: {file_hash[:16]}...")
             
-            if not self.force and self.integrity_checker.should_skip(file_hash):
+            if not self.force and self.integrity_checker.should_skip(file_hash, self.collection):
                 logger.info(f"  ⏭️  File already processed, skipping (use force=True to reprocess)")
                 return PipelineResult(
                     success=True,
@@ -321,27 +327,57 @@ class IngestionPipeline:
             logger.info("\n🔄 Stage 4: Transform Pipeline")
             _notify("transform", 4)
             
-            # 4a: Chunk Refinement
-            logger.info("  4a. Chunk Refinement...")
             _t0_transform = time.monotonic()
             # snapshot before refinement
             _pre_refine_texts = {c.id: c.text for c in chunks}
-            chunks = self.chunk_refiner.transform(chunks, trace)
+            logger.info("  4a/4b/4c. Chunk Refinement + Metadata Enrichment + Image Captioning (parallel)...")
+            base_chunks = copy.deepcopy(chunks)
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                future_refine = executor.submit(self.chunk_refiner.transform, copy.deepcopy(base_chunks), None)
+                future_meta = executor.submit(self.metadata_enricher.transform, copy.deepcopy(base_chunks), None)
+                future_caption = executor.submit(self.image_captioner.transform, copy.deepcopy(base_chunks), None)
+                refined_chunks = future_refine.result()
+                meta_chunks = future_meta.result()
+                caption_chunks = future_caption.result()
+
+            refined_by_id = {c.id: c for c in refined_chunks}
+            meta_by_id = {c.id: c for c in meta_chunks}
+            caption_by_id = {c.id: c for c in caption_chunks}
+
+            merged_chunks: List[Chunk] = []
+            for base in chunks:
+                refined_chunk = refined_by_id.get(base.id, base)
+                meta_chunk = meta_by_id.get(base.id, base)
+                caption_chunk = caption_by_id.get(base.id, base)
+
+                merged_metadata = dict(refined_chunk.metadata)
+                for key in ("title", "summary", "tags", "hypothetical_questions", "enriched_by", "enrich_error"):
+                    if key in meta_chunk.metadata:
+                        merged_metadata[key] = meta_chunk.metadata.get(key)
+                image_captions = caption_chunk.metadata.get("image_captions", [])
+                if image_captions:
+                    merged_metadata["image_captions"] = image_captions
+                merged_text = inject_captions_into_text(refined_chunk.text, image_captions)
+
+                merged_chunks.append(
+                    Chunk(
+                        id=base.id,
+                        text=merged_text,
+                        metadata=merged_metadata,
+                        start_offset=base.start_offset,
+                        end_offset=base.end_offset,
+                        source_ref=base.source_ref,
+                    )
+                )
+            chunks = merged_chunks
+
+            enriched_by_llm = sum(1 for c in chunks if c.metadata.get("enriched_by") == "llm")
+            enriched_by_rule = sum(1 for c in chunks if c.metadata.get("enriched_by") == "rule")
+            captioned = sum(1 for c in chunks if c.metadata.get("image_captions"))
             refined_by_llm = sum(1 for c in chunks if c.metadata.get("refined_by") == "llm")
             refined_by_rule = sum(1 for c in chunks if c.metadata.get("refined_by") == "rule")
             logger.info(f"      LLM refined: {refined_by_llm}, Rule refined: {refined_by_rule}")
-            
-            # 4b: Metadata Enrichment
-            logger.info("  4b. Metadata Enrichment...")
-            chunks = self.metadata_enricher.transform(chunks, trace)
-            enriched_by_llm = sum(1 for c in chunks if c.metadata.get("enriched_by") == "llm")
-            enriched_by_rule = sum(1 for c in chunks if c.metadata.get("enriched_by") == "rule")
             logger.info(f"      LLM enriched: {enriched_by_llm}, Rule enriched: {enriched_by_rule}")
-            
-            # 4c: Image Captioning
-            logger.info("  4c. Image Captioning...")
-            chunks = self.image_captioner.transform(chunks, trace)
-            captioned = sum(1 for c in chunks if c.metadata.get("image_captions"))
             logger.info(f"      Chunks with captions: {captioned}")
             
             stages["transform"] = {
@@ -387,14 +423,19 @@ class IngestionPipeline:
             
             dense_vectors = batch_result.dense_vectors
             sparse_stats = batch_result.sparse_stats
-            
+            summary_vectors = getattr(batch_result, "summary_vectors", [None for _ in chunks])
+            question_vectors = getattr(batch_result, "hypothetical_vectors", [None for _ in chunks])
+
             logger.info(f"  Dense vectors: {len(dense_vectors)} (dim={len(dense_vectors[0]) if dense_vectors else 0})")
-            logger.info(f"  Sparse stats: {len(sparse_stats)} documents")
+            if sparse_stats:
+                logger.info(f"  Sparse stats: {len(sparse_stats)} documents")
             
             stages["encoding"] = {
                 "dense_vector_count": len(dense_vectors),
                 "dense_dimension": len(dense_vectors[0]) if dense_vectors else 0,
-                "sparse_doc_count": len(sparse_stats)
+                "sparse_doc_count": len(sparse_stats),
+                "summary_vector_count": len([v for v in summary_vectors if v is not None]),
+                "hypothetical_vector_count": len([v for v in question_vectors if v is not None])
             }
             if trace is not None:
                 # Build per-chunk encoding details (both dense & sparse)
@@ -408,7 +449,7 @@ class IngestionPipeline:
                     if idx < len(dense_vectors):
                         detail["dense_dim"] = len(dense_vectors[idx])
                     # Sparse: BM25 term stats
-                    if idx < len(sparse_stats):
+                    if sparse_stats and idx < len(sparse_stats):
                         ss = sparse_stats[idx]
                         detail["doc_length"] = ss.get("doc_length", 0)
                         detail["unique_terms"] = ss.get("unique_terms", 0)
@@ -433,25 +474,33 @@ class IngestionPipeline:
             _notify("upsert", 6)
             
             # 6a: Vector Upsert
-            logger.info("  6a. Vector Storage (ChromaDB)...")
+            logger.info("  6a. Vector Storage...")
             _t0_storage = time.monotonic()
-            vector_ids = self.vector_upserter.upsert(chunks, dense_vectors, trace)
+            vector_ids = self.vector_upserter.upsert(
+                chunks,
+                dense_vectors,
+                trace,
+                extra_vectors={
+                    "summary": summary_vectors,
+                    "hypothetical_questions": question_vectors
+                },
+            )
             logger.info(f"      Stored {len(vector_ids)} vectors")
 
-            # Align BM25 chunk_ids with Chroma vector IDs so the SparseRetriever
-            # can look up BM25 hits in the vector store after retrieval.
-            for stat, vid in zip(sparse_stats, vector_ids):
-                stat["chunk_id"] = vid
-
+            if sparse_stats:
+                for stat, vid in zip(sparse_stats, vector_ids):
+                    stat["chunk_id"] = vid
+            
             # 6b: BM25 Index
-            logger.info("  6b. BM25 Index...")
-            self.bm25_indexer.add_documents(
-                sparse_stats,
-                collection=self.collection,
-                doc_id=document.id,
-                trace=trace,
-            )
-            logger.info(f"      Index built for {len(sparse_stats)} documents")
+            if self.bm25_indexer is not None and sparse_stats:
+                logger.info("  6b. BM25 Index...")
+                self.bm25_indexer.add_documents(
+                    sparse_stats,
+                    collection=self.collection,
+                    doc_id=document.id,
+                    trace=trace,
+                )
+                logger.info(f"      Index built for {len(sparse_stats)} documents")
             
             # 6c: Register images in image storage index
             # Note: Images are already saved by PdfLoader, we just need to index them
@@ -497,6 +546,7 @@ class IngestionPipeline:
                     for img in images
                 ]
                 trace.record_stage("upsert", {
+                    "method": "vector_upserter",
                     "dense_store": {
                         "backend": "ChromaDB",
                         "collection": self.collection,
@@ -553,6 +603,7 @@ class IngestionPipeline:
     
     def close(self) -> None:
         """Clean up resources."""
+        self.vector_upserter.close()
         self.image_storage.close()
 
 

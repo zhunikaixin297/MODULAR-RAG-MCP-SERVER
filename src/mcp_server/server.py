@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import os
 from typing import TYPE_CHECKING
 
 from src.mcp_server.protocol_handler import create_mcp_server
@@ -122,8 +123,66 @@ def run_stdio_server() -> int:
     return asyncio.run(run_stdio_server_async())
 
 
+def create_starlette_app():
+    """Create Starlette app for SSE transport."""
+    import mcp.server.sse
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    _preload_heavy_imports()
+    
+    server = create_mcp_server(SERVER_NAME, SERVER_VERSION)
+    sse = mcp.server.sse.SseServerTransport("/messages")
+
+    # Use classes to avoid Starlette's automatic wrapping of functions into Request/Response handlers.
+    # Starlette's Route checks `inspect.isfunction` or `inspect.ismethod`. 
+    # By using a class with `__call__`, we provide a raw ASGI application directly.
+    
+    class SSEHandler:
+        async def __call__(self, scope, receive, send):
+            async with sse.connect_sse(scope, receive, send) as streams:
+                await server.run(
+                    streams[0], streams[1], server.create_initialization_options()
+                )
+
+    class MessagesHandler:
+        async def __call__(self, scope, receive, send):
+            await sse.handle_post_message(scope, receive, send)
+
+    return Starlette(
+        debug=True,
+        routes=[
+            Route("/sse", endpoint=SSEHandler()),
+            Route("/messages", endpoint=MessagesHandler(), methods=["POST"]),
+        ],
+    )
+
+
+def run_sse_server(host: str = "0.0.0.0", port: int = 8000) -> int:
+    """Run MCP server over SSE.
+
+    Args:
+        host: Bind host
+        port: Bind port
+    """
+    import uvicorn
+    
+    # Configure logging
+    logger = get_logger(log_level="INFO")
+    logger.info(f"Starting MCP server (SSE transport) on {host}:{port}")
+    
+    app = create_starlette_app()
+    uvicorn.run(app, host=host, port=port)
+    return 0
+
+
 def main() -> int:
-    """Entry point for stdio MCP server."""
+    """Entry point for MCP server.
+    
+    Defaults to stdio unless --sse flag is provided.
+    """
+    if "--sse" in sys.argv:
+        return run_sse_server()
     return run_stdio_server()
 
 

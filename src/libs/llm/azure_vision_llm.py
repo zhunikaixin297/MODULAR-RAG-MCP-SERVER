@@ -149,6 +149,7 @@ class AzureVisionLLM(BaseVisionLLM):
         
         # Store any additional kwargs for future use
         self._extra_config = kwargs
+        self._session = requests.Session()
     
     def chat_with_image(
         self,
@@ -399,7 +400,7 @@ class AzureVisionLLM(BaseVisionLLM):
         }
         
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=60)
+            response = self._session.post(url, json=payload, headers=headers, timeout=60)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.HTTPError as e:
@@ -411,3 +412,6 @@ class AzureVisionLLM(BaseVisionLLM):
              raise AzureVisionLLMError(
                  f"[Azure Vision] Request failed: {e}"
              ) from e
+
+    def close(self) -> None:
+        self._session.close()

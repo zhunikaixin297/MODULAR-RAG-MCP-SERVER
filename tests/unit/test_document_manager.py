@@ -184,7 +184,7 @@ def _make_manager(
     image_list: Optional[List[Dict[str, Any]]] = None,
 ) -> DocumentManager:
     """Build a DocumentManager with mock stores."""
-    chroma = MagicMock()
+    vector_store = MagicMock()
     bm25 = MagicMock()
     images = MagicMock()
     integrity = MagicMock()
@@ -192,16 +192,14 @@ def _make_manager(
     # Default integrity list_processed
     integrity.list_processed.return_value = integrity_records or []
 
-    # Default Chroma collection.get
-    chroma.collection = MagicMock()
-    chroma.collection.get.return_value = {"ids": chroma_get_ids or []}
+    # Default VectorStore methods
+    vector_store.count_by_metadata.return_value = len(chroma_get_ids or [])
+    vector_store.get_ids_by_metadata.return_value = chroma_get_ids or []
+    vector_store.delete_by_metadata.return_value = len(chroma_get_ids or [])
 
     # Default image list
     images.list_images.return_value = image_list or []
     images.delete_image.return_value = True
-
-    # Default delete_by_metadata
-    chroma.delete_by_metadata.return_value = len(chroma_get_ids or [])
 
     # Default bm25 remove
     bm25.remove_document.return_value = True
@@ -212,7 +210,7 @@ def _make_manager(
     # compute_sha256 returns a fixed hash
     integrity.compute_sha256.return_value = "abc123"
 
-    mgr = DocumentManager(chroma, bm25, images, integrity)
+    mgr = DocumentManager(vector_store, bm25, images, integrity)
     return mgr
 
 
@@ -300,31 +298,31 @@ class TestDocumentManagerDelete:
         test_file.write_bytes(b"data")
 
         mgr = _make_manager()
-        mgr.chroma.delete_by_metadata.side_effect = RuntimeError("chroma fail")
-        result = mgr.delete_document(str(test_file), "default")
+        mgr.vector_store.delete_by_metadata.side_effect = RuntimeError("vector_store fail")
+        mgr.bm25.remove_document.side_effect = Exception("bm25 fail")
+
+        result = mgr.delete_document(str(test_file))
         assert result.success is False
-        assert any("ChromaDB" in e for e in result.errors)
-        # Other stores still attempted
-        mgr.bm25.remove_document.assert_called_once()
+        assert len(result.errors) == 2
+        # Remaining stores should still be called
+        mgr.images.list_images.assert_called_once()
         mgr.integrity.remove_record.assert_called_once()
 
     def test_delete_file_missing_falls_back_to_integrity(self):
+        # File doesn't exist
+        path = "/tmp/missing.pdf"
         mgr = _make_manager(
-            integrity_records=[
-                {
-                    "file_hash": "xyz789",
-                    "file_path": "/gone/missing.pdf",
-                    "collection": "default",
-                    "processed_at": "2025-01-01",
-                    "updated_at": "2025-01-01",
-                },
-            ],
+            integrity_records=[{"file_path": path, "file_hash": "hash99"}]
         )
-        mgr.integrity.compute_sha256.side_effect = FileNotFoundError("gone")
-        result = mgr.delete_document("/gone/missing.pdf", "default")
-        # Should fall back to _hash_from_path
-        assert result.success is True or len(result.errors) == 0 or True
-        mgr.chroma.delete_by_metadata.assert_called_once()
+        # Mock compute_sha256 to fail (simulating file missing)
+        mgr.integrity.compute_sha256.side_effect = FileNotFoundError()
+
+        result = mgr.delete_document(path)
+        assert result.success is True
+        mgr.vector_store.delete_by_metadata.assert_called_once()
+        # Verify it used hash99 from integrity
+        args, kwargs = mgr.vector_store.delete_by_metadata.call_args
+        assert args[0]["doc_hash"] == "hash99"
 
 
 class TestDocumentManagerStats:

@@ -37,9 +37,9 @@ class TestRecursiveSplitterConfiguration:
     ) -> Any:
         """Create mock settings object."""
         settings = MagicMock()
-        settings.ingestion = MagicMock()
-        settings.ingestion.chunk_size = chunk_size
-        settings.ingestion.chunk_overlap = chunk_overlap
+        settings.splitter = MagicMock()
+        settings.splitter.chunk_size = chunk_size
+        settings.splitter.chunk_overlap = chunk_overlap
         return settings
     
     def test_initialization_from_settings(self):
@@ -86,11 +86,11 @@ class TestRecursiveSplitterConfiguration:
         assert "" in splitter.separators      # Characters
     
     def test_initialization_missing_settings(self):
-        """Test error when settings.ingestion is missing."""
+        """Test error when settings.splitter is missing."""
         settings = MagicMock()
-        settings.ingestion = None
+        settings.splitter = None
         
-        with pytest.raises(ValueError, match="Missing ingestion configuration"):
+        with pytest.raises(ValueError, match="Missing splitter configuration"):
             RecursiveSplitter(settings=settings)
     
     def test_initialization_invalid_chunk_size_negative(self):
@@ -140,9 +140,9 @@ class TestRecursiveSplitterBasicSplitting:
     ) -> Any:
         """Create mock settings object."""
         settings = MagicMock()
-        settings.ingestion = MagicMock()
-        settings.ingestion.chunk_size = chunk_size
-        settings.ingestion.chunk_overlap = chunk_overlap
+        settings.splitter = MagicMock()
+        settings.splitter.chunk_size = chunk_size
+        settings.splitter.chunk_overlap = chunk_overlap
         return settings
     
     def test_split_short_text(self):
@@ -226,9 +226,9 @@ class TestRecursiveSplitterMarkdownStructure:
     ) -> Any:
         """Create mock settings object."""
         settings = MagicMock()
-        settings.ingestion = MagicMock()
-        settings.ingestion.chunk_size = chunk_size
-        settings.ingestion.chunk_overlap = chunk_overlap
+        settings.splitter = MagicMock()
+        settings.splitter.chunk_size = chunk_size
+        settings.splitter.chunk_overlap = chunk_overlap
         return settings
     
     def test_split_markdown_with_headers(self):
@@ -311,9 +311,9 @@ class TestRecursiveSplitterEdgeCases:
     ) -> Any:
         """Create mock settings object."""
         settings = MagicMock()
-        settings.ingestion = MagicMock()
-        settings.ingestion.chunk_size = chunk_size
-        settings.ingestion.chunk_overlap = chunk_overlap
+        settings.splitter = MagicMock()
+        settings.splitter.chunk_size = chunk_size
+        settings.splitter.chunk_overlap = chunk_overlap
         return settings
     
     def test_split_very_long_text(self):
@@ -387,9 +387,9 @@ class TestRecursiveSplitterImportError:
             from src.libs.splitter.recursive_splitter import RecursiveSplitter
             
             settings = MagicMock()
-            settings.ingestion = MagicMock()
-            settings.ingestion.chunk_size = 1000
-            settings.ingestion.chunk_overlap = 200
+            settings.splitter = MagicMock()
+            settings.splitter.chunk_size = 1000
+            settings.splitter.chunk_overlap = 200
             
             with pytest.raises(ImportError, match="langchain-text-splitters is not installed"):
                 RecursiveSplitter(settings=settings)
@@ -408,10 +408,10 @@ class TestRecursiveSplitterFactoryIntegration:
         
         # Create settings
         settings = MagicMock()
-        settings.ingestion = MagicMock()
-        settings.ingestion.splitter = "recursive"
-        settings.ingestion.chunk_size = 500
-        settings.ingestion.chunk_overlap = 100
+        settings.splitter = MagicMock()
+        settings.splitter.provider = "recursive"
+        settings.splitter.chunk_size = 500
+        settings.splitter.chunk_overlap = 100
         
         # Factory should create RecursiveSplitter
         splitter = SplitterFactory.create(settings)

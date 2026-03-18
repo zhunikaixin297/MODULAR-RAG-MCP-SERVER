@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from src.libs.vector_store.base_vector_store import BaseVectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +76,7 @@ class DocumentManager:
     """Coordinate document lifecycle across all storage backends.
 
     Args:
-        chroma_store: ChromaStore instance (vector store).
+        vector_store: BaseVectorStore instance (vector store).
         bm25_indexer: BM25Indexer instance (sparse index).
         image_storage: ImageStorage instance (image files + SQLite index).
         file_integrity: SQLiteIntegrityChecker instance (ingestion history).
@@ -81,12 +84,12 @@ class DocumentManager:
 
     def __init__(
         self,
-        chroma_store: Any,
+        vector_store: BaseVectorStore,
         bm25_indexer: Any,
         image_storage: Any,
         file_integrity: Any,
     ) -> None:
-        self.chroma = chroma_store
+        self.vector_store = vector_store
         self.bm25 = bm25_indexer
         self.images = image_storage
         self.integrity = file_integrity
@@ -101,7 +104,7 @@ class DocumentManager:
         """Return a list of ingested documents.
 
         Combines information from the integrity checker (source_path,
-        hash, processed_at) with counts from ChromaDB and ImageStorage.
+        hash, processed_at) with counts from VectorStore and ImageStorage.
 
         Args:
             collection: Optional collection filter.
@@ -117,7 +120,7 @@ class DocumentManager:
             source_path = rec["file_path"]
             coll = rec.get("collection")
 
-            # Count chunks in Chroma
+            # Count chunks in VectorStore
             chunk_count = self._count_chunks(source_hash)
 
             # Count images
@@ -165,7 +168,7 @@ class DocumentManager:
 
         source_hash = record["file_hash"]
 
-        # Collect chunk IDs from Chroma
+        # Collect chunk IDs from VectorStore
         chunk_ids = self._get_chunk_ids(source_hash)
 
         # Collect image IDs
@@ -226,14 +229,14 @@ class DocumentManager:
                     result.errors.append(f"Cannot identify document: {e}")
                     return result
 
-        # 1. ChromaDB – delete chunks matching source_hash
+        # 1. VectorStore – delete chunks matching source_hash
         try:
-            count = self.chroma.delete_by_metadata(
+            count = self.vector_store.delete_by_metadata(
                 {"doc_hash": source_hash}
             )
             result.chunks_deleted = count
         except Exception as e:
-            result.errors.append(f"ChromaDB delete failed: {e}")
+            result.errors.append(f"VectorStore delete failed: {e}")
 
         # 2. BM25 – remove postings for this document
         try:
@@ -299,22 +302,20 @@ class DocumentManager:
     # ------------------------------------------------------------------
 
     def _count_chunks(self, source_hash: str) -> int:
-        """Count chunks in Chroma that belong to *source_hash*."""
+        """Count chunks in VectorStore that belong to *source_hash*."""
         try:
-            results = self.chroma.collection.get(
-                where={"doc_hash": source_hash}, include=[]
+            return self.vector_store.count_by_metadata(
+                {"doc_hash": source_hash}
             )
-            return len(results.get("ids", []))
         except Exception:
             return 0
 
     def _get_chunk_ids(self, source_hash: str) -> List[str]:
-        """Return chunk IDs from Chroma matching *source_hash*."""
+        """Return chunk IDs from VectorStore matching *source_hash*."""
         try:
-            results = self.chroma.collection.get(
-                where={"doc_hash": source_hash}, include=[]
+            return self.vector_store.get_ids_by_metadata(
+                {"doc_hash": source_hash}
             )
-            return results.get("ids", [])
         except Exception:
             return []
 

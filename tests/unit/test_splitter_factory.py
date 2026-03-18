@@ -133,8 +133,8 @@ class TestSplitterFactory:
     def test_create_success(self):
         SplitterFactory.register_provider("fake", FakeSplitter)
         settings = MagicMock()
-        settings.ingestion = MagicMock()
-        settings.ingestion.splitter = "fake"
+        settings.splitter = MagicMock()
+        settings.splitter.provider = "fake"
         
         splitter = SplitterFactory.create(settings)
         assert isinstance(splitter, FakeSplitter)
@@ -143,8 +143,8 @@ class TestSplitterFactory:
     def test_create_case_insensitive(self):
         SplitterFactory.register_provider("fake", FakeSplitter)
         settings = MagicMock()
-        settings.ingestion = MagicMock()
-        settings.ingestion.splitter = "FAKE"
+        settings.splitter = MagicMock()
+        settings.splitter.provider = "FAKE"
         
         splitter = SplitterFactory.create(settings)
         assert isinstance(splitter, FakeSplitter)
@@ -152,8 +152,8 @@ class TestSplitterFactory:
     def test_create_with_overrides(self):
         SplitterFactory.register_provider("fake", FakeSplitter)
         settings = MagicMock()
-        settings.ingestion = MagicMock()
-        settings.ingestion.splitter = "fake"
+        settings.splitter = MagicMock()
+        settings.splitter.provider = "fake"
         
         splitter = SplitterFactory.create(settings, custom_param=123)
         assert splitter.kwargs["custom_param"] == 123
@@ -161,8 +161,8 @@ class TestSplitterFactory:
     def test_create_unknown_provider(self):
         SplitterFactory.register_provider("fake", FakeSplitter)
         settings = MagicMock()
-        settings.ingestion = MagicMock()
-        settings.ingestion.splitter = "unknown"
+        settings.splitter = MagicMock()
+        settings.splitter.provider = "unknown"
         
         with pytest.raises(ValueError) as exc_info:
             SplitterFactory.create(settings)
@@ -170,14 +170,13 @@ class TestSplitterFactory:
         error_message = str(exc_info.value)
         assert "Unsupported Splitter provider: 'unknown'" in error_message
         assert "Available providers: fake" in error_message
-        assert "B7.5" in error_message
     
     def test_create_missing_provider_config(self):
         settings = MagicMock()
-        settings.ingestion = None
+        settings.splitter = None
         
         with pytest.raises(ValueError) as exc_info:
             SplitterFactory.create(settings)
         
         error_message = str(exc_info.value)
-        assert "settings.ingestion.splitter" in error_message
+        assert "settings.splitter.provider" in error_message

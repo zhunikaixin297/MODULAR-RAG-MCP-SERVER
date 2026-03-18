@@ -113,11 +113,11 @@ class ConfigService:
         if s.ingestion:
             cards.append(ComponentInfo(
                 name="Ingestion",
-                provider=s.ingestion.splitter,
+                provider=s.splitter.provider,
                 model="-",
                 extra={
-                    "chunk_size": s.ingestion.chunk_size,
-                    "chunk_overlap": s.ingestion.chunk_overlap,
+                    "chunk_size": s.splitter.chunk_size,
+                    "chunk_overlap": s.splitter.chunk_overlap,
                     "batch_size": s.ingestion.batch_size,
                 },
             ))

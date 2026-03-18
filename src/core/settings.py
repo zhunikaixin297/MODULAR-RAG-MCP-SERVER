@@ -119,8 +119,9 @@ class EmbeddingSettings:
 @dataclass(frozen=True)
 class VectorStoreSettings:
     provider: str
-    persist_directory: str
     collection_name: str
+    persist_directory: Optional[str] = None  # For Chroma
+    opensearch: Optional[OpenSearchSettings] = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,7 @@ class RetrievalSettings:
     sparse_top_k: int
     fusion_top_k: int
     rrf_k: int
+    sparse_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -137,6 +139,10 @@ class RerankSettings:
     provider: str
     model: str
     top_k: int
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    timeout: float = 30.0
+    max_concurrency: int = 50
 
 
 @dataclass(frozen=True)
@@ -169,12 +175,71 @@ class VisionLLMSettings:
 
 @dataclass(frozen=True)
 class IngestionSettings:
-    chunk_size: int
-    chunk_overlap: int
-    splitter: str
     batch_size: int
+    sparse_enabled: bool = True
+    bm25_enabled: bool = True
     chunk_refiner: Optional[Dict[str, Any]] = None  # 动态配置
     metadata_enricher: Optional[Dict[str, Any]] = None  # 动态配置
+
+
+@dataclass(frozen=True)
+class SplitterSettings:
+    provider: str
+    chunk_size: int
+    chunk_overlap: int
+
+
+@dataclass(frozen=True)
+class DoclingSettings:
+    general: DoclingGeneralSettings
+    vlm: Optional[DoclingVLMSettings] = None
+    llm: Optional[DoclingLLMSettings] = None
+
+
+@dataclass(frozen=True)
+class LoaderSettings:
+    provider: str
+    docling: Optional[DoclingSettings] = None
+
+
+@dataclass(frozen=True)
+class OpenSearchSettings:
+    hosts: List[str]
+    index_name: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+    use_ssl: bool = False
+    verify_certs: bool = False
+    timeout_seconds: int = 60
+    max_retries: int = 3
+    batch_size: int = 200
+    max_concurrency: int = 10
+    refresh: bool = False
+
+
+@dataclass(frozen=True)
+class DoclingGeneralSettings:
+    images_scale: float = 1.0
+    generate_picture_images: bool = True
+    do_formula_recognition: bool = False
+    do_table_enrichment: bool = False
+    do_pic_enrichment: bool = False
+    do_ocr: bool = False
+    accelerator_device: str = "CPU"
+    accelerator_num_threads: int = 4
+    max_concurrent_docs: int = 1
+    timeout_seconds: int = 300
+    image_output_dir: str = "./data/images/docling"
+
+
+@dataclass(frozen=True)
+class DoclingVLMSettings:
+    max_concurrency: int = 5
+
+
+@dataclass(frozen=True)
+class DoclingLLMSettings:
+    max_concurrency: int = 5
 
 
 @dataclass(frozen=True)
@@ -186,6 +251,8 @@ class Settings:
     rerank: RerankSettings
     evaluation: EvaluationSettings
     observability: ObservabilitySettings
+    loader: LoaderSettings
+    splitter: SplitterSettings
     ingestion: Optional[IngestionSettings] = None
     vision_llm: Optional[VisionLLMSettings] = None
 
@@ -196,22 +263,23 @@ class Settings:
 
         llm = _require_mapping(data, "llm", "settings")
         embedding = _require_mapping(data, "embedding", "settings")
-        vector_store = _require_mapping(data, "vector_store", "settings")
+        vector_store_data = _require_mapping(data, "vector_store", "settings")
         retrieval = _require_mapping(data, "retrieval", "settings")
         rerank = _require_mapping(data, "rerank", "settings")
         evaluation = _require_mapping(data, "evaluation", "settings")
         observability = _require_mapping(data, "observability", "settings")
+        loader_data = _require_mapping(data, "loader", "settings")
+        splitter_data = _require_mapping(data, "splitter", "settings")
 
         ingestion_settings = None
         if "ingestion" in data:
             ingestion = _require_mapping(data, "ingestion", "settings")
             ingestion_settings = IngestionSettings(
-                chunk_size=_require_int(ingestion, "chunk_size", "ingestion"),
-                chunk_overlap=_require_int(ingestion, "chunk_overlap", "ingestion"),
-                splitter=_require_str(ingestion, "splitter", "ingestion"),
                 batch_size=_require_int(ingestion, "batch_size", "ingestion"),
-                chunk_refiner=ingestion.get("chunk_refiner"),  # 可选配置
-                metadata_enricher=ingestion.get("metadata_enricher"),  # 可选配置
+                sparse_enabled=bool(ingestion.get("sparse_enabled", True)),
+                bm25_enabled=bool(ingestion.get("bm25_enabled", True)),
+                chunk_refiner=ingestion.get("chunk_refiner"),
+                metadata_enricher=ingestion.get("metadata_enricher"),
             )
 
         vision_llm_settings = None
@@ -228,6 +296,89 @@ class Settings:
                 deployment_name=vision_llm.get("deployment_name"),
                 base_url=vision_llm.get("base_url"),
             )
+
+        # Parse Vector Store with optional OpenSearch
+        opensearch_settings = None
+        if "opensearch" in vector_store_data:
+            opensearch = _require_mapping(vector_store_data, "opensearch", "vector_store")
+            hosts = opensearch.get("hosts")
+            if not hosts:
+                host = opensearch.get("host", "localhost")
+                port = opensearch.get("port", 9200)
+                scheme = opensearch.get("scheme", "http")
+                hosts = [f"{scheme}://{host}:{port}"]
+            opensearch_settings = OpenSearchSettings(
+                hosts=[str(item) for item in hosts],
+                index_name=str(opensearch.get("index_name", "knowledge_hub")),
+                username=opensearch.get("username"),
+                password=opensearch.get("password"),
+                use_ssl=bool(opensearch.get("use_ssl", False)),
+                verify_certs=bool(opensearch.get("verify_certs", False)),
+                timeout_seconds=int(opensearch.get("timeout_seconds", 60)),
+                max_retries=int(opensearch.get("max_retries", 3)),
+                batch_size=int(opensearch.get("batch_size", 200)),
+                max_concurrency=int(opensearch.get("max_concurrency", 10)),
+                refresh=bool(opensearch.get("refresh", False)),
+            )
+
+        vector_store_settings = VectorStoreSettings(
+            provider=_require_str(vector_store_data, "provider", "vector_store"),
+            collection_name=_require_str(vector_store_data, "collection_name", "vector_store"),
+            persist_directory=vector_store_data.get("persist_directory"),
+            opensearch=opensearch_settings,
+        )
+
+        # Parse Loader with optional Docling
+        docling_settings = None
+        if "docling" in loader_data:
+            docling_data = _require_mapping(loader_data, "docling", "loader")
+            general_data = _require_mapping(docling_data, "general", "loader.docling")
+            
+            docling_general = DoclingGeneralSettings(
+                images_scale=float(general_data.get("images_scale", 1.0)),
+                generate_picture_images=bool(general_data.get("generate_picture_images", True)),
+                do_formula_recognition=bool(general_data.get("do_formula_recognition", False)),
+                do_table_enrichment=bool(general_data.get("do_table_enrichment", False)),
+                do_pic_enrichment=bool(general_data.get("do_pic_enrichment", False)),
+                do_ocr=bool(general_data.get("do_ocr", False)),
+                accelerator_device=str(general_data.get("accelerator_device", "CPU")),
+                accelerator_num_threads=int(general_data.get("accelerator_num_threads", 4)),
+                max_concurrent_docs=int(general_data.get("max_concurrent_docs", 1)),
+                timeout_seconds=int(general_data.get("timeout_seconds", 300)),
+                image_output_dir=str(general_data.get("image_output_dir", "./data/images/docling")),
+            )
+            
+            docling_vlm = None
+            if "vlm" in docling_data:
+                vlm_data = _require_mapping(docling_data, "vlm", "loader.docling")
+                docling_vlm = DoclingVLMSettings(
+                    max_concurrency=int(vlm_data.get("max_concurrency", 5)),
+                )
+                
+            docling_llm = None
+            if "llm" in docling_data:
+                llm_data = _require_mapping(docling_data, "llm", "loader.docling")
+                docling_llm = DoclingLLMSettings(
+                    max_concurrency=int(llm_data.get("max_concurrency", 5)),
+                )
+            
+            docling_settings = DoclingSettings(
+                general=docling_general,
+                vlm=docling_vlm,
+                llm=docling_llm,
+            )
+
+        loader_settings = LoaderSettings(
+            provider=_require_str(loader_data, "provider", "loader"),
+            docling=docling_settings,
+        )
+
+        # Parse Splitter
+        splitter_settings = SplitterSettings(
+            provider=_require_str(splitter_data, "provider", "splitter"),
+            chunk_size=_require_int(splitter_data, "chunk_size", "splitter"),
+            chunk_overlap=_require_int(splitter_data, "chunk_overlap", "splitter"),
+        )
 
         settings = cls(
             llm=LLMSettings(
@@ -251,22 +402,23 @@ class Settings:
                 deployment_name=embedding.get("deployment_name"),
                 base_url=embedding.get("base_url"),
             ),
-            vector_store=VectorStoreSettings(
-                provider=_require_str(vector_store, "provider", "vector_store"),
-                persist_directory=_require_str(vector_store, "persist_directory", "vector_store"),
-                collection_name=_require_str(vector_store, "collection_name", "vector_store"),
-            ),
+            vector_store=vector_store_settings,
             retrieval=RetrievalSettings(
                 dense_top_k=_require_int(retrieval, "dense_top_k", "retrieval"),
                 sparse_top_k=_require_int(retrieval, "sparse_top_k", "retrieval"),
                 fusion_top_k=_require_int(retrieval, "fusion_top_k", "retrieval"),
                 rrf_k=_require_int(retrieval, "rrf_k", "retrieval"),
+                sparse_enabled=bool(retrieval.get("sparse_enabled", True)),
             ),
             rerank=RerankSettings(
                 enabled=_require_bool(rerank, "enabled", "rerank"),
                 provider=_require_str(rerank, "provider", "rerank"),
                 model=_require_str(rerank, "model", "rerank"),
                 top_k=_require_int(rerank, "top_k", "rerank"),
+                base_url=rerank.get("base_url"),
+                api_key=rerank.get("api_key"),
+                timeout=float(rerank.get("timeout", 30.0)),
+                max_concurrency=int(rerank.get("max_concurrency", 50)),
             ),
             evaluation=EvaluationSettings(
                 enabled=_require_bool(evaluation, "enabled", "evaluation"),
@@ -279,6 +431,8 @@ class Settings:
                 trace_file=_require_str(observability, "trace_file", "observability"),
                 structured_logging=_require_bool(observability, "structured_logging", "observability"),
             ),
+            loader=loader_settings,
+            splitter=splitter_settings,
             ingestion=ingestion_settings,
             vision_llm=vision_llm_settings,
         )

@@ -156,6 +156,41 @@ class DenseEncoder:
                     )
         
         return all_vectors
+
+    def encode_texts(
+        self,
+        texts: List[str],
+        trace: Optional[Any] = None,
+    ) -> List[Optional[List[float]]]:
+        if texts is None:
+            raise ValueError("Texts list cannot be None")
+        if not texts:
+            return []
+        valid_texts = []
+        valid_indices = []
+        for idx, text in enumerate(texts):
+            if text and text.strip():
+                valid_texts.append(text)
+                valid_indices.append(idx)
+        results: List[Optional[List[float]]] = [None for _ in texts]
+        if not valid_texts:
+            return results
+        for batch_start in range(0, len(valid_texts), self.batch_size):
+            batch_end = min(batch_start + self.batch_size, len(valid_texts))
+            batch_texts = valid_texts[batch_start:batch_end]
+            batch_vectors = self.embedding.embed(
+                texts=batch_texts,
+                trace=trace,
+            )
+            if len(batch_vectors) != len(batch_texts):
+                raise RuntimeError(
+                    f"Embedding provider returned {len(batch_vectors)} vectors "
+                    f"for {len(batch_texts)} texts in batch {batch_start}-{batch_end}"
+                )
+            for offset, vector in enumerate(batch_vectors):
+                original_index = valid_indices[batch_start + offset]
+                results[original_index] = vector
+        return results
     
     def get_batch_count(self, num_chunks: int) -> int:
         """Calculate number of batches needed for given chunk count.

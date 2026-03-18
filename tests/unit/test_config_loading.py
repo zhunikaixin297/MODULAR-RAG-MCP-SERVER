@@ -51,10 +51,13 @@ def test_load_settings_success(tmp_path: Path) -> None:
       trace_file: ./logs/traces.jsonl
       structured_logging: true
     ingestion:
+      batch_size: 100
+    loader:
+      provider: pdf
+    splitter:
+      provider: recursive
       chunk_size: 1000
       chunk_overlap: 200
-      splitter: recursive
-      batch_size: 100
     """
     settings_path = tmp_path / "settings.yaml"
     _write_yaml(settings_path, config)
@@ -105,6 +108,12 @@ def test_missing_required_field_raises_error(tmp_path: Path) -> None:
       trace_enabled: true
       trace_file: ./logs/traces.jsonl
       structured_logging: true
+    loader:
+      provider: pdf
+    splitter:
+      provider: recursive
+      chunk_size: 1000
+      chunk_overlap: 200
     """
     settings_path = tmp_path / "settings.yaml"
     _write_yaml(settings_path, config)

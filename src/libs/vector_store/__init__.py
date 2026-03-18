@@ -17,9 +17,15 @@ try:
 except ImportError:
     # ChromaDB not installed, skip registration
     pass
+try:
+    from src.libs.vector_store.opensearch_store import OpenSearchStore
+    VectorStoreFactory.register_provider('opensearch', OpenSearchStore)
+except ImportError:
+    OpenSearchStore = None
 
 __all__ = [
     'BaseVectorStore',
     'VectorStoreFactory',
     'ChromaStore',
+    'OpenSearchStore',
 ]

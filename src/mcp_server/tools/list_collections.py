@@ -182,6 +182,75 @@ class ListCollectionsTool:
             raise RuntimeError(
                 f"Failed to initialize ChromaDB client at '{persist_path}': {e}"
             ) from e
+
+    def _get_opensearch_client(self) -> Any:
+        try:
+            from opensearchpy import OpenSearch
+        except ImportError:
+            raise ImportError(
+                "opensearch-py is required for list_collections with OpenSearch. "
+                "Install it with: pip install opensearch-py"
+            )
+
+        vector_store = getattr(self.settings, "vector_store", None)
+        opensearch_config = getattr(vector_store, "opensearch", None)
+        if opensearch_config is None:
+            raise RuntimeError("OpenSearch config not found in settings.vector_store.opensearch")
+
+        hosts = getattr(opensearch_config, "hosts", None)
+        if not hosts:
+            host = getattr(opensearch_config, "host", "localhost")
+            port = getattr(opensearch_config, "port", 9200)
+            scheme = getattr(opensearch_config, "scheme", "http")
+            hosts = [f"{scheme}://{host}:{port}"]
+
+        username = getattr(opensearch_config, "username", None)
+        password = getattr(opensearch_config, "password", None)
+        use_ssl = getattr(opensearch_config, "use_ssl", False)
+        verify_certs = getattr(opensearch_config, "verify_certs", False)
+
+        return OpenSearch(
+            hosts=hosts,
+            http_auth=(username, password) if username or password else None,
+            use_ssl=use_ssl,
+            verify_certs=verify_certs,
+        )
+
+    def _list_opensearch_collections(self, include_stats: bool = True) -> List[CollectionInfo]:
+        try:
+            client = self._get_opensearch_client()
+        except (ImportError, RuntimeError) as e:
+            logger.error(f"Failed to get OpenSearch client: {e}")
+            return []
+
+        vector_store = getattr(self.settings, "vector_store", None)
+        opensearch_config = getattr(vector_store, "opensearch", None)
+        base_index = getattr(opensearch_config, "index_name", "default")
+        system_indices_prefixes = (".", "security-auditlog")
+
+        try:
+            indices = client.cat.indices(format="json")
+        except Exception as e:
+            logger.error(f"Failed to list OpenSearch indices: {e}")
+            return []
+
+        collections_info: List[CollectionInfo] = []
+        for item in indices:
+            index_name = item.get("index", "")
+            if not index_name or index_name.startswith(system_indices_prefixes):
+                continue
+            collections_info.append(CollectionInfo(name=index_name))
+
+        if include_stats and collections_info:
+            for info in collections_info:
+                index_name = info.name
+                try:
+                    count = client.count(index=index_name).get("count")
+                    info.count = int(count) if count is not None else None
+                except Exception as e:
+                    logger.warning(f"Failed to get count for index '{index_name}': {e}")
+
+        return collections_info
     
     def list_collections(
         self,
@@ -195,6 +264,10 @@ class ListCollectionsTool:
         Returns:
             List of CollectionInfo objects.
         """
+        provider = getattr(getattr(self.settings, "vector_store", None), "provider", "chroma").lower()
+        if provider == "opensearch":
+            return self._list_opensearch_collections(include_stats=include_stats)
+
         try:
             client = self._get_chroma_client()
         except (ImportError, RuntimeError) as e:

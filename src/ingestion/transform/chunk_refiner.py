@@ -342,7 +342,7 @@ class ChunkRefiner(BaseTransform):
         text = text.strip()
         
         return text
-    
+
     def _llm_refine(
         self,
         text: str,

@@ -229,6 +229,10 @@ class DocumentChunker:
             image_refs = [m.strip() for m in matches]
         
         chunk_metadata["image_refs"] = image_refs
+        if image_refs:
+            chunk_metadata["image_ids"] = image_refs
+            if len(image_refs) == 1:
+                chunk_metadata["image_id"] = image_refs[0]
         
         # Build chunk-specific 'images' list with full metadata for referenced images
         # This is needed by ImageCaptioner to access image paths for Vision API calls

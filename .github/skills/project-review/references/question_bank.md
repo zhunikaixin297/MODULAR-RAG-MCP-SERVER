@@ -27,18 +27,18 @@
 | # | 题目 | 难度 | 考察要点 | 参考答案要点 |
 |---|------|------|---------|------------|
 | 2A-01 | Loader 阶段的职责是什么？输入输出分别是什么？ | ⭐ | Loader职责 | 输入：原始文件路径；输出：Document对象(text=Markdown + metadata含source_path/doc_type/page/images) |
-| 2A-02 | 为什么 Loader 输出的格式选择了 Markdown？ | ⭐⭐ | 技术选型 | 方便配合 RecursiveCharacterTextSplitter 的 Markdown Separators，结构感知切分质量更高 |
+| 2A-02 | Docling 解析器相比 PyMuPDF 的核心优势是什么？ | ⭐⭐ | 技术选型 | PyMuPDF 是基于规则的，容易丢失结构；Docling 基于 VLM，能精准识别 Header 层级、表格和图片，产出高质量 Markdown |
 | 2A-03 | 前置去重（File Integrity Check）是怎么工作的？用了什么算法？ | ⭐⭐ | 幂等设计 | 计算文件 SHA256 哈希 → 查 SQLite ingestion_history → status='success' 则跳过，实现零成本增量更新 |
 | 2A-04 | ingestion_history 表结构有哪些字段？status 有哪几种状态？ | ⭐⭐ | 存储设计 | file_hash(PK)/file_path/file_size/status(success/failed/processing)/processed_at/error_msg/chunk_count |
-| 2A-05 | 使用 MarkItDown 解析 PDF 的核心优势是什么？有什么局限？ | ⭐⭐ | 技术选型 | 优势：直接输出 Markdown，与 Splitter 天然兼容；局限：复杂表格/图形可能解析不完整，需 LLM 后处理 |
+| 2A-05 | 为什么 Loader 输出的格式选择了 Markdown？ | ⭐⭐ | 接口标准化 | Markdown 是大模型最友好的格式，且天然携带层级结构（# H1），方便 Splitter 做语义切分 |
 
 ### 2B：Splitter 阶段
 
 | # | 题目 | 难度 | 考察要点 | 参考答案要点 |
 |---|------|------|---------|------------|
-| 2B-01 | 什么是 RecursiveCharacterTextSplitter？它如何做到"语义感知切分"？ | ⭐⭐ | 切分原理 | 按层级分隔符递归尝试：Markdown标题→段落→句子→字符，在 chunk_size 限制内保持最大语义完整性 |
+| 2B-01 | 什么是 SemanticMarkdownSplitter？它和递归字符切分有什么区别？ | ⭐⭐ | 切分原理 | SemanticSplitter 优先在 Markdown 标题（H1/H2）处切分，保留逻辑块完整性；递归字符切分只关注长度，容易切断语义 |
 | 2B-02 | Chunk 必须包含哪些定位字段？为什么这些字段很重要？ | ⭐ | 元数据设计 | source/chunk_index/start_offset(或等价定位字段)；支持检索命中后溯源定位，Dashboard 展示原文来源 |
-| 2B-03 | 固定长度切分 vs 递归字符切分 vs 语义切分的优缺点各是什么？ | ⭐⭐⭐ | 切分策略比较 | 固定切：简单但破坏语义；递归字符：平衡，当前选择；语义切：质量最高但需Embedding计算，成本高 |
+| 2B-03 | 如果文档非常长，语义切分后 Chunk 依然超过 Token 限制怎么办？ | ⭐⭐⭐ | 边界处理 | SemanticSplitter 有回退机制：当逻辑块（如一个 H2 章节）过长时，内部会降级使用递归字符切分，强行截断 |
 | 2B-04 | chunk_overlap 参数的作用是什么？太大或太小有什么问题？ | ⭐⭐ | 参数影响 | 确保跨边界信息不丢失；太小：边界处语义断裂；太大：冗余数据多、存储成本高 |
 
 ### 2C：Transform & Enrichment 阶段
@@ -55,10 +55,10 @@
 
 | # | 题目 | 难度 | 考察要点 | 参考答案要点 |
 |---|------|------|---------|------------|
-| 2D-01 | 什么是 Dense Embedding？什么是 Sparse Embedding？各自的优势是什么？ | ⭐ | 向量基础 | Dense：高维浮点向量，捕捉语义，解决"词不同意同"；Sparse：关键词权重，捕捉精确匹配，解决专有名词 |
+| 2D-01 | OpenSearch 相比 Chroma 在 Embedding 阶段有什么优势？ | ⭐ | 存储选型 | 分布式架构支持海量数据；支持 async_bulk 异步批量写入，吞吐量远高于单机 Chroma |
 | 2D-02 | 为什么要做差量计算（Incremental Embedding）？是怎么实现的？ | ⭐⭐ | 成本优化 | 计算 Chunk 内容哈希(ContentHash)，仅对库中未存在的哈希调用 Embedding API，文件改名不重算 |
 | 2D-03 | 批处理（Batch Processing）在 Embedding 阶段如何优化性能？ | ⭐⭐ | 工程优化 | 按 batch_size 分批调用 API，减少网络 RTT；最大化 GPU/CPU 利用率；避免单条高频调用触发限流 |
-| 2D-04 | BM25 是什么算法？为什么叫"稀疏向量"？ | ⭐⭐ | BM25原理 | BM25=Best Match 25，基于词频(TF)和逆文档频率(IDF)计算相关性；大多数词权重为0，高维但稀疏 |
+| 2D-04 | 为什么在 OpenSearch 写入时需要 Semaphore 并发控制？ | ⭐⭐⭐ | 并发控制 | 防止海量 Chunk 瞬间并发写入压垮 ES 集群或触发 HTTP 连接池耗尽；平滑写入流量 |
 | 2D-05 | Embedding 存储时和什么一起原子化写入？为什么要原子化？ | ⭐⭐⭐ | All-in-One存储 | Dense Vector + Sparse Vector + Chunk原文 + Metadata 一起写入；命中后无需二次查库，保证毫秒级响应 |
 
 ### 2E：文档生命周期管理
@@ -85,17 +85,17 @@
 
 | # | 题目 | 难度 | 考察要点 | 参考答案要点 |
 |---|------|------|---------|------------|
-| 3B-01 | Hybrid Search 的 Dense Route 和 Sparse Route 分别是什么？各解决什么问题？ | ⭐ | 混合检索基础 | Dense：Embedding相似度匹配语义(词不同意同)；Sparse：BM25关键词匹配(专有名词精确查找) |
+| 3B-01 | Hybrid Search 在 OpenSearch 下是怎么实现的？ | ⭐ | 混合检索基础 | 使用 script_score 或 bool query 结合 knn_vector (Dense) 和 match (Sparse) 查询；支持多字段（Content/Summary）联合召回 |
 | 3B-02 | RRF 算法的公式是什么？为什么用排名而不是分数直接融合？ | ⭐⭐⭐ | RRF原理 | `Score = 1/(k+Rank_Dense) + 1/(k+Rank_Sparse)`；分数量纲不同，直接融合易失衡；排名融合更鲁棒 |
-| 3B-03 | 两路检索是并行执行还是串行执行的？为什么？ | ⭐⭐ | 性能设计 | 并行执行；Dense和Sparse彼此独立，并行可减少50%+等待时间 |
-| 3B-04 | RRF 中的平滑因子 k 起什么作用？k 值越大越小怎么影响结果？ | ⭐⭐⭐ | 参数理解 | 避免排名1文档分数远高于第2名；k越大，高低排名分数差距越小（更平滑）；通常取k=60 |
+| 3B-03 | 两路检索是并行执行还是串行执行的？为什么？ | ⭐⭐ | 性能设计 | 并行执行；Dense和Sparse彼此独立，并行可减少50%+等待时间；OpenSearch 内部也是并发执行分片查询 |
+| 3B-04 | 为什么要在检索时同时查询 Summary 和 Generated Questions 字段？ | ⭐⭐⭐ | 召回策略 | 正文(显式语义)、摘要(概括语义)、问题(潜在意图)互补；增加召回的多样性，防止单一维度漏召回 |
 
 ### 3C：过滤与重排（Filtering & Reranking）
 
 | # | 题目 | 难度 | 考察要点 | 参考答案要点 |
 |---|------|------|---------|------------|
 | 3C-01 | Metadata Filtering 的"先解析、能前置则前置"原则是什么意思？ | ⭐⭐ | 过滤策略 | 硬约束(collection/doc_type)在检索阶段Pre-filter缩小候选集；软偏好/不稳定字段做Post-filter或排序信号 |
-| 3C-02 | Reranker 支持哪 3 种后端？默认是哪种？不可用时如何降级？ | ⭐⭐ | Reranker设计 | ①None ②Cross-Encoder(本地/托管) ③LLM Rerank；超时/失败必须回退到RRF排序，保证可用性 |
+| 3C-02 | TEI (Text Embeddings Inference) Reranker 有什么优势？ | ⭐⭐ | Reranker设计 | 专为推理优化的 Rust 后端，支持 Continuous Batching 和 Flash Attention，吞吐量比原生 Python 实现高数倍 |
 | 3C-03 | Cross-Encoder 和 Bi-Encoder（Dense Embedding）在架构上有什么区别？ | ⭐⭐⭐ | 模型原理 | Bi-Encoder独立编码Query和Doc(快，离线可用)；Cross-Encoder联合编码[Query,Doc]对(慢但更精准，需实时计算) |
 | 3C-04 | 为什么 LLM Rerank 的候选数量要比 Cross-Encoder 更小（M<=20）？ | ⭐⭐⭐ | 成本控制 | LLM 逐对打分 Token 成本高；候选数越大成本指数级增加；需要严格结构化输出(JSON)降低解析风险 |
 
@@ -106,10 +106,10 @@
 | # | 题目 | 难度 | 考察要点 | 参考答案要点 |
 |---|------|------|---------|------------|
 | 4-01 | MCP 是什么协议？和普通 REST API 相比有什么优势？ | ⭐ | MCP基础 | Model Context Protocol，标准化 AI 助手与外部工具的对接；无需自建 Chat UI，直接复用 Copilot/Claude 入口 |
-| 4-02 | 为什么选择 Stdio Transport 而不是 HTTP？Stdio 的工作方式是什么？ | ⭐⭐ | 传输选型 | Client 以子进程启动 Server，通过 stdin/stdout 交换 JSON-RPC；零配置、隐私安全、无需端口管理 |
+| 4-02 | 为什么同时支持 Stdio 和 SSE 两种 Transport？各有什么适用场景？ | ⭐⭐ | 传输选型 | Stdio：本地单进程，零配置，适合个人开发；SSE：HTTP流式传输，适合远程部署、网关集成和多租户场景 |
 | 4-03 | Stdio Transport 有什么严格约束必须遵守？ | ⭐⭐ | 实现约束 | stdout 仅输出合法 MCP 消息，禁止混入日志；日志统一写 stderr，避免污染通信通道 |
 | 4-04 | Server 对外暴露哪 3 个核心工具（Tools）？分别是什么？ | ⭐ | 工具设计 | `query_knowledge_hub`(主检索入口) / `list_collections`(列举集合) / `get_document_summary`(获取文档摘要) |
-| 4-05 | `query_knowledge_hub` 的返回格式是什么？如何体现"引用透明"？ | ⭐⭐ | 返回设计 | structuredContent 含 citations 数组(source/page/text/score)；content 数组含 Markdown 带[1]标注的人类可读版本 |
+| 4-05 | MCP Server 是如何处理高并发请求的？ | ⭐⭐ | 并发模型 | 基于 asyncio 异步框架；耗时操作（如 Embed/Search）扔进线程池（run_in_executor），避免阻塞主事件循环 |
 | 4-06 | 多模态图片是怎么通过 MCP 返回给 Client 的？Client 侧如何处理？ | ⭐⭐⭐ | 多模态返回 | 检索命中图片 → Server 读本地文件 → Base64 编码 → `{type:image, data:base64, mimeType:image/png}`；Client 决定渲染策略 |
 | 4-07 | 为什么 MCP 返回的 content 数组第一项要始终是纯文本/Markdown 版本？ | ⭐⭐ | 兼容性设计 | 最低兼容性保证；不同 Client 的多模态支持能力不同，纯文本是最通用的降级兜底格式 |
 

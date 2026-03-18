@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from typing import Any, Dict, List, Optional
+import httpx
 
 from src.libs.llm.base_llm import BaseLLM, ChatResponse, Message
 
@@ -105,6 +106,7 @@ class AzureLLM(BaseLLM):
         
         # Store any additional kwargs for future use
         self._extra_config = kwargs
+        self._http_client: Optional[httpx.Client] = None
     
     def chat(
         self,
@@ -190,8 +192,6 @@ class AzureLLM(BaseLLM):
         Raises:
             AzureLLMError: If the API call fails.
         """
-        import httpx
-        
         # Azure endpoint format:
         # {endpoint}/openai/deployments/{deployment}/chat/completions?api-version={version}
         url = (
@@ -209,16 +209,15 @@ class AzureLLM(BaseLLM):
         }
         
         try:
-            with httpx.Client(timeout=60.0) as client:
-                response = client.post(url, json=payload, headers=headers)
-                
-                if response.status_code != 200:
-                    error_detail = self._parse_error_response(response)
-                    raise AzureLLMError(
-                        f"[Azure] API error (HTTP {response.status_code}): {error_detail}"
-                    )
-                
-                return response.json()
+            if self._http_client is None:
+                self._http_client = httpx.Client(timeout=60.0)
+            response = self._http_client.post(url, json=payload, headers=headers)
+            if response.status_code != 200:
+                error_detail = self._parse_error_response(response)
+                raise AzureLLMError(
+                    f"[Azure] API error (HTTP {response.status_code}): {error_detail}"
+                )
+            return response.json()
         except httpx.TimeoutException as e:
             raise AzureLLMError(
                 f"[Azure] Request timed out after 60 seconds"
@@ -247,3 +246,8 @@ class AzureLLM(BaseLLM):
             return response.text
         except Exception:
             return response.text or "Unknown error"
+
+    def close(self) -> None:
+        if self._http_client is not None:
+            self._http_client.close()
+            self._http_client = None

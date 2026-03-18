@@ -165,6 +165,7 @@ class MetadataEnricher(BaseTransform):
                 'title': 'Untitled',
                 'summary': text_preview,
                 'tags': [],
+                'hypothetical_questions': [],
                 'enriched_by': 'error',
                 'enrich_error': str(e)
             }
@@ -294,6 +295,7 @@ class MetadataEnricher(BaseTransform):
                     'title': 'Untitled',
                     'summary': text_preview,
                     'tags': [],
+                    'hypothetical_questions': [],
                     'enriched_by': 'error',
                     'enrich_error': str(e)
                 }
@@ -350,7 +352,8 @@ class MetadataEnricher(BaseTransform):
         return {
             'title': title,
             'summary': summary,
-            'tags': tags
+            'tags': tags,
+            'hypothetical_questions': []
         }
     
     def _extract_title(self, text: str) -> str:
@@ -548,7 +551,8 @@ class MetadataEnricher(BaseTransform):
         metadata = {
             'title': '',
             'summary': '',
-            'tags': []
+            'tags': [],
+            'hypothetical_questions': []
         }
         
         # Extract title
@@ -569,6 +573,12 @@ class MetadataEnricher(BaseTransform):
             tags = [tag.strip() for tag in tags_text.split(',') if tag.strip()]
             metadata['tags'] = tags
         
+        questions_match = re.search(r'Hypothetical Questions:\s*(.+?)(?:\n|$)', response, re.IGNORECASE)
+        if questions_match:
+            questions_text = questions_match.group(1).strip()
+            questions = [q.strip() for q in re.split(r'\s*\|\s*', questions_text) if q.strip()]
+            metadata['hypothetical_questions'] = questions
+
         # Validation: ensure non-empty values
         if not metadata['title']:
             metadata['title'] = 'Untitled'
@@ -576,3 +586,4 @@ class MetadataEnricher(BaseTransform):
             metadata['summary'] = response[:500]  # Fallback to raw response
         
         return metadata
+

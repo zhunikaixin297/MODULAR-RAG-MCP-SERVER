@@ -7,6 +7,10 @@ of different backends without code changes.
 
 from __future__ import annotations
 
+import asyncio
+import atexit
+import inspect
+from threading import RLock
 from typing import TYPE_CHECKING, Any
 
 from src.libs.vector_store.base_vector_store import BaseVectorStore
@@ -30,6 +34,8 @@ class VectorStoreFactory:
     
     # Registry of supported providers (to be populated in B7.x tasks)
     _PROVIDERS: dict[str, type[BaseVectorStore]] = {}
+    _INSTANCES: dict[tuple[Any, ...], BaseVectorStore] = {}
+    _LOCK = RLock()
     
     @classmethod
     def register_provider(cls, name: str, provider_class: type[BaseVectorStore]) -> None:
@@ -91,14 +97,26 @@ class VectorStoreFactory:
                 f"Provider implementations will be added in task B7.6 and beyond."
             )
         
-        # Instantiate the provider
-        # Provider classes should accept settings and optional kwargs
+        cache_key = (
+            provider_name,
+            provider_class,
+            cls._freeze_kwargs(override_kwargs),
+            cls._settings_signature(settings),
+        )
+        with cls._LOCK:
+            cached = cls._INSTANCES.get(cache_key)
+            if cached is not None:
+                return cached
+
         try:
-            return provider_class(settings=settings, **override_kwargs)
+            instance = provider_class(settings=settings, **override_kwargs)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to instantiate VectorStore provider '{provider_name}': {e}"
             ) from e
+        with cls._LOCK:
+            cls._INSTANCES[cache_key] = instance
+        return instance
     
     @classmethod
     def list_providers(cls) -> list[str]:
@@ -112,3 +130,68 @@ class VectorStoreFactory:
             ['chroma', 'milvus', 'qdrant']
         """
         return sorted(cls._PROVIDERS.keys())
+
+    @classmethod
+    def close_all(cls) -> None:
+        with cls._LOCK:
+            instances = list(cls._INSTANCES.values())
+            cls._INSTANCES.clear()
+        for instance in instances:
+            close_fn = getattr(instance, "close", None)
+            if not callable(close_fn):
+                continue
+            result = close_fn()
+            if inspect.iscoroutine(result):
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(result)
+                except RuntimeError:
+                    asyncio.run(result)
+
+    @classmethod
+    def _freeze_kwargs(cls, kwargs: dict[str, Any]) -> tuple[Any, ...]:
+        if not kwargs:
+            return ()
+        return tuple((key, cls._freeze_value(value)) for key, value in sorted(kwargs.items()))
+
+    @classmethod
+    def _freeze_value(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return tuple((k, cls._freeze_value(v)) for k, v in sorted(value.items()))
+        if isinstance(value, (list, tuple)):
+            return tuple(cls._freeze_value(v) for v in value)
+        if isinstance(value, set):
+            return tuple(sorted(cls._freeze_value(v) for v in value))
+        if isinstance(value, (str, int, float, bool, type(None))):
+            return value
+        return repr(value)
+
+    @classmethod
+    def _settings_signature(cls, settings: Settings) -> tuple[Any, ...]:
+        vector_store = getattr(settings, "vector_store", None)
+        if vector_store is None:
+            return ()
+        provider = getattr(vector_store, "provider", None)
+        base = (
+            provider,
+            getattr(vector_store, "collection_name", None),
+            getattr(vector_store, "persist_directory", None),
+        )
+        if str(provider).lower() != "opensearch":
+            return base
+        opensearch = getattr(vector_store, "opensearch", None)
+        if opensearch is None:
+            return base
+        return base + (
+            cls._freeze_value(getattr(opensearch, "hosts", None)),
+            getattr(opensearch, "host", None),
+            getattr(opensearch, "port", None),
+            getattr(opensearch, "scheme", None),
+            getattr(opensearch, "index_name", None),
+            getattr(opensearch, "username", None),
+            getattr(opensearch, "use_ssl", None),
+            getattr(opensearch, "verify_certs", None),
+        )
+
+
+atexit.register(VectorStoreFactory.close_all)

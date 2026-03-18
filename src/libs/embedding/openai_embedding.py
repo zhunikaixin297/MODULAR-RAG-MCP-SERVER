@@ -97,6 +97,21 @@ class OpenAIEmbedding(BaseEmbedding):
         
         # Store any additional kwargs for future use
         self._extra_config = kwargs
+        try:
+            from openai import OpenAI
+        except ImportError as e:
+            raise RuntimeError(
+                "OpenAI Python package not installed. "
+                "Install with: pip install openai"
+            ) from e
+        client_kwargs = {
+            "api_key": self.api_key,
+            "base_url": self.base_url,
+        }
+        if self._use_azure_auth and self.api_version:
+            client_kwargs["default_query"] = {"api-version": self.api_version}
+            client_kwargs["default_headers"] = {"api-key": self.api_key}
+        self._client = OpenAI(**client_kwargs)
     
     def embed(
         self,
@@ -122,27 +137,6 @@ class OpenAIEmbedding(BaseEmbedding):
         # Validate input
         self.validate_texts(texts)
         
-        # Import OpenAI client (lazy import to avoid dependency at module level)
-        try:
-            from openai import OpenAI
-        except ImportError as e:
-            raise RuntimeError(
-                "OpenAI Python package not installed. "
-                "Install with: pip install openai"
-            ) from e
-        
-        # Initialize OpenAI client
-        client_kwargs = {
-            "api_key": self.api_key,
-            "base_url": self.base_url,
-        }
-        # Azure-compatible mode: add api-version query param and api-key header
-        if self._use_azure_auth and self.api_version:
-            client_kwargs["default_query"] = {"api-version": self.api_version}
-            client_kwargs["default_headers"] = {"api-key": self.api_key}
-        
-        client = OpenAI(**client_kwargs)
-        
         # Prepare API call parameters
         api_params = {
             "input": texts,
@@ -157,7 +151,7 @@ class OpenAIEmbedding(BaseEmbedding):
         
         # Call OpenAI API
         try:
-            response = client.embeddings.create(**api_params)
+            response = self._client.embeddings.create(**api_params)
         except Exception as e:
             raise OpenAIEmbeddingError(
                 f"OpenAI Embeddings API call failed: {e}"
@@ -179,6 +173,11 @@ class OpenAIEmbedding(BaseEmbedding):
             )
         
         return embeddings
+
+    def close(self) -> None:
+        close_fn = getattr(self._client, "close", None)
+        if callable(close_fn):
+            close_fn()
     
     def get_dimension(self) -> Optional[int]:
         """Get the embedding dimension for the configured model.

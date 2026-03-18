@@ -9,15 +9,18 @@ Instructions:
 1. Generate a concise, descriptive title (max 150 characters) that captures the main topic
 2. Write a summary (2-3 sentences, max 500 characters) that explains the key content
 3. Extract 3-10 relevant tags/keywords that categorize the content
+4. Generate 3-5 hypothetical questions that this chunk could answer
 
 Format your response exactly as follows:
 Title: <your generated title>
 Summary: <your generated summary>
 Tags: <tag1>, <tag2>, <tag3>, ...
+Hypothetical Questions: <question1> | <question2> | <question3>
 
 Requirements:
 - Title should be clear and informative, not generic
 - Summary should capture the essence, not just repeat the title
 - Tags should be specific topics, concepts, or entities mentioned in the text
 - Use comma-separated values for tags
+- Use pipe-separated values for hypothetical questions
 - Be concise and precise

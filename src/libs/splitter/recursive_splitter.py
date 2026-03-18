@@ -82,13 +82,13 @@ class RecursiveSplitter(BaseSplitter):
         
         # Extract configuration from settings with overrides
         try:
-            ingestion_config = settings.ingestion
-            self.chunk_size = chunk_size if chunk_size is not None else ingestion_config.chunk_size
-            self.chunk_overlap = chunk_overlap if chunk_overlap is not None else ingestion_config.chunk_overlap
+            splitter_config = settings.splitter
+            self.chunk_size = chunk_size if chunk_size is not None else splitter_config.chunk_size
+            self.chunk_overlap = chunk_overlap if chunk_overlap is not None else splitter_config.chunk_overlap
         except AttributeError as e:
             raise ValueError(
-                "Missing ingestion configuration in settings. "
-                "Expected settings.ingestion.chunk_size and settings.ingestion.chunk_overlap"
+                "Missing splitter configuration in settings. "
+                "Expected settings.splitter.chunk_size and settings.splitter.chunk_overlap"
             ) from e
         
         # Validate configuration
