@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -253,41 +253,34 @@ class HybridSearch:
         merged_filters = self._merge_filters(processed_query.filters, filters)
         
         # Step 2: Run retrievals
-        dense_results, sparse_results, dense_error, sparse_error = self._run_retrievals(
+        dense_ranking_lists, sparse_results, dense_error, sparse_error = self._run_retrievals(
             processed_query=processed_query,
             filters=merged_filters,
             trace=trace,
         )
+        dense_results = dense_ranking_lists[0] if dense_ranking_lists else []
         
-        # Step 3: Handle fallback scenarios
+        # Step 3: Handle failure scenarios
         used_fallback = False
         if dense_error and sparse_error:
-            # Both failed - raise error
             raise RuntimeError(
                 f"Both retrieval paths failed. "
                 f"Dense error: {dense_error}. Sparse error: {sparse_error}"
             )
-        elif dense_error:
-            # Dense failed, use sparse only
-            logger.warning(f"Dense retrieval failed, using sparse only: {dense_error}")
+        if dense_error:
+            logger.warning(f"Dense retrieval failed: {dense_error}")
             used_fallback = True
-            fused_results = sparse_results or []
-        elif sparse_error:
-            # Sparse failed, use dense only
-            logger.warning(f"Sparse retrieval failed, using dense only: {sparse_error}")
+        if sparse_error:
+            logger.warning(f"Sparse retrieval failed: {sparse_error}")
             used_fallback = True
-            fused_results = dense_results or []
-        elif not dense_results and not sparse_results:
-            # Both succeeded but returned empty
-            fused_results = []
-        else:
-            # Step 4: Fuse results
-            fused_results = self._fuse_results(
-                dense_results=dense_results or [],
-                sparse_results=sparse_results or [],
-                top_k=effective_top_k,
-                trace=trace,
-            )
+        
+        # Step 4: Unified fusion (multi-channel dense + sparse)
+        fused_results = self._fuse_results(
+            dense_ranking_lists=dense_ranking_lists,
+            sparse_results=sparse_results or [],
+            top_k=effective_top_k,
+            trace=trace,
+        )
         
         # Step 5: Apply post-fusion metadata filters (if any)
         if merged_filters and self.config.metadata_filter_post:
@@ -359,7 +352,7 @@ class HybridSearch:
         filters: Optional[Dict[str, Any]],
         trace: Optional[Any],
     ) -> Tuple[
-        Optional[List[RetrievalResult]],
+        List[List[RetrievalResult]],
         Optional[List[RetrievalResult]],
         Optional[str],
         Optional[str],
@@ -374,9 +367,9 @@ class HybridSearch:
             trace: Optional TraceContext.
             
         Returns:
-            Tuple of (dense_results, sparse_results, dense_error, sparse_error).
+            Tuple of (dense_ranking_lists, sparse_results, dense_error, sparse_error).
         """
-        dense_results: Optional[List[RetrievalResult]] = None
+        dense_ranking_lists: List[List[RetrievalResult]] = []
         sparse_results: Optional[List[RetrievalResult]] = None
         dense_error: Optional[str] = None
         sparse_error: Optional[str] = None
@@ -397,17 +390,15 @@ class HybridSearch:
             if self.dense_retriever is None and self.sparse_retriever is None:
                 dense_error = "No retriever configured"
                 sparse_error = "No retriever configured"
-            return dense_results, sparse_results, dense_error, sparse_error
+            return dense_ranking_lists, sparse_results, dense_error, sparse_error
         
         if self.config.parallel_retrieval and run_dense and run_sparse:
-            # Run in parallel
-            dense_results, sparse_results, dense_error, sparse_error = (
+            dense_ranking_lists, sparse_results, dense_error, sparse_error = (
                 self._run_parallel_retrievals(processed_query, filters, trace)
             )
         else:
-            # Run sequentially
             if run_dense:
-                dense_results, dense_error = self._run_dense_retrieval(
+                dense_ranking_lists, dense_error = self._run_dense_retrieval(
                     processed_query.original_query, filters, trace
                 )
             
@@ -416,7 +407,7 @@ class HybridSearch:
                     processed_query.keywords, filters, trace
                 )
         
-        return dense_results, sparse_results, dense_error, sparse_error
+        return dense_ranking_lists, sparse_results, dense_error, sparse_error
     
     def _run_parallel_retrievals(
         self,
@@ -424,7 +415,7 @@ class HybridSearch:
         filters: Optional[Dict[str, Any]],
         trace: Optional[Any],
     ) -> Tuple[
-        Optional[List[RetrievalResult]],
+        List[List[RetrievalResult]],
         Optional[List[RetrievalResult]],
         Optional[str],
         Optional[str],
@@ -437,9 +428,9 @@ class HybridSearch:
             trace: Optional TraceContext.
             
         Returns:
-            Tuple of (dense_results, sparse_results, dense_error, sparse_error).
+            Tuple of (dense_ranking_lists, sparse_results, dense_error, sparse_error).
         """
-        dense_results: Optional[List[RetrievalResult]] = None
+        dense_ranking_lists: List[List[RetrievalResult]] = []
         sparse_results: Optional[List[RetrievalResult]] = None
         dense_error: Optional[str] = None
         sparse_error: Optional[str] = None
@@ -466,13 +457,11 @@ class HybridSearch:
             # Collect results
             for name, future in futures.items():
                 try:
-                    results, error = future.result(timeout=30)
+                    output = future.result(timeout=30)
                     if name == 'dense':
-                        dense_results = results
-                        dense_error = error
+                        dense_ranking_lists, dense_error = output
                     else:
-                        sparse_results = results
-                        sparse_error = error
+                        sparse_results, sparse_error = output
                 except Exception as e:
                     error_msg = f"{name} retrieval failed with exception: {e}"
                     logger.error(error_msg)
@@ -481,14 +470,14 @@ class HybridSearch:
                     else:
                         sparse_error = error_msg
         
-        return dense_results, sparse_results, dense_error, sparse_error
+        return dense_ranking_lists, sparse_results, dense_error, sparse_error
     
     def _run_dense_retrieval(
         self,
         query: str,
         filters: Optional[Dict[str, Any]],
         trace: Optional[Any],
-    ) -> Tuple[Optional[List[RetrievalResult]], Optional[str]]:
+    ) -> Tuple[List[List[RetrievalResult]], Optional[str]]:
         """Run dense retrieval with error handling.
         
         Args:
@@ -497,19 +486,28 @@ class HybridSearch:
             trace: Optional TraceContext.
             
         Returns:
-            Tuple of (results, error). If successful, error is None.
+            Tuple of (ranking_lists, error). If successful, error is None.
         """
         if self.dense_retriever is None:
-            return None, "Dense retriever not configured"
+            return [], "Dense retriever not configured"
         
         try:
             _t0 = time.monotonic()
-            results = self.dense_retriever.retrieve(
-                query=query,
-                top_k=self.config.dense_top_k,
-                filters=filters,
-                trace=trace,
-            )
+            vector_store = getattr(self.dense_retriever, "vector_store", None)
+            provider_name = str(getattr(vector_store, "__class__", type("Unknown", (), {})).__name__).lower()
+            if "opensearch" in provider_name:
+                os_filters = dict(filters or {})
+                os_filters.pop("collection", None)
+                ranking_lists = self._run_dense_multichannel_retrieval(query, os_filters, trace)
+            else:
+                single_results = self.dense_retriever.retrieve(
+                    query=query,
+                    top_k=self.config.dense_top_k,
+                    filters=filters,
+                    trace=trace,
+                )
+                ranking_lists = [single_results] if single_results else []
+            results = ranking_lists[0] if ranking_lists else []
             _elapsed = (time.monotonic() - _t0) * 1000.0
             if trace is not None:
                 trace.record_stage("dense_retrieval", {
@@ -519,7 +517,7 @@ class HybridSearch:
                     "result_count": len(results) if results else 0,
                     "chunks": _snapshot_results(results),
                 }, elapsed_ms=_elapsed)
-            return results, None
+            return ranking_lists, None
         except Exception as e:
             error_msg = f"Dense retrieval error: {e}"
             logger.error(error_msg)
@@ -529,7 +527,50 @@ class HybridSearch:
                     "error": error_msg,
                     "result_count": 0,
                 })
-            return None, error_msg
+            return [], error_msg
+
+    def _run_dense_multichannel_retrieval(
+        self,
+        query: str,
+        filters: Optional[Dict[str, Any]],
+        trace: Optional[Any],
+    ) -> List[List[RetrievalResult]]:
+        vector_fields = [
+            "embedding_content",
+            "embedding_summary",
+            "embedding_hypothetical_questions",
+        ]
+        embedding_client = getattr(self.dense_retriever, "embedding_client", None)
+        vector_store = getattr(self.dense_retriever, "vector_store", None)
+        if embedding_client is None or vector_store is None:
+            raise RuntimeError("Dense retriever dependencies not configured")
+        query_vectors = embedding_client.embed([query], trace=trace)
+        query_vector = query_vectors[0]
+        raw_results_by_field: List[List[Dict[str, Any]]] = []
+        with ThreadPoolExecutor(max_workers=len(vector_fields)) as executor:
+            futures = {
+                field: executor.submit(
+                    vector_store.query,
+                    vector=query_vector,
+                    top_k=self.config.dense_top_k,
+                    filters=filters,
+                    trace=trace,
+                    vector_field=field,
+                )
+                for field in vector_fields
+            }
+            for field, future in futures.items():
+                try:
+                    raw_results = future.result(timeout=30)
+                    raw_results_by_field.append(raw_results)
+                except Exception as e:
+                    logger.warning(f"Multichannel dense retrieval failed for {field}: {e}")
+        ranking_lists: List[List[RetrievalResult]] = []
+        for raw_results in raw_results_by_field:
+            transformed = self.dense_retriever._transform_results(raw_results)
+            if transformed:
+                ranking_lists.append(transformed)
+        return ranking_lists
     
     def _run_sparse_retrieval(
         self,
@@ -581,7 +622,7 @@ class HybridSearch:
     
     def _fuse_results(
         self,
-        dense_results: List[RetrievalResult],
+        dense_ranking_lists: List[List[RetrievalResult]],
         sparse_results: List[RetrievalResult],
         top_k: int,
         trace: Optional[Any],
@@ -589,7 +630,7 @@ class HybridSearch:
         """Fuse Dense and Sparse results using RRF.
         
         Args:
-            dense_results: Results from dense retrieval.
+            dense_ranking_lists: Dense channel ranking lists.
             sparse_results: Results from sparse retrieval.
             top_k: Number of results to return after fusion.
             trace: Optional TraceContext.
@@ -600,12 +641,12 @@ class HybridSearch:
         if self.fusion is None:
             # Fallback: interleave results (simple round-robin)
             logger.warning("No fusion configured, using simple interleave")
-            return self._interleave_results(dense_results, sparse_results, top_k)
+            dense_primary_results = dense_ranking_lists[0] if dense_ranking_lists else []
+            return self._interleave_results(dense_primary_results, sparse_results, top_k)
         
-        # Build ranking lists for RRF
         ranking_lists = []
-        if dense_results:
-            ranking_lists.append(dense_results)
+        if dense_ranking_lists:
+            ranking_lists.extend([items for items in dense_ranking_lists if items])
         if sparse_results:
             ranking_lists.append(sparse_results)
         

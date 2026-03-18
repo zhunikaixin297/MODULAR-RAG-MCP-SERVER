@@ -27,6 +27,11 @@ def _lazy_import_cross_encoder_reranker():
     return CrossEncoderReranker
 
 
+def _lazy_import_tei_reranker():
+    from src.libs.reranker.tei_reranker import TEIReranker
+    return TEIReranker
+
+
 class RerankerFactory:
     """Factory for creating Reranker provider instances.
     
@@ -84,6 +89,10 @@ class RerankerFactory:
         if "cross_encoder" not in cls._PROVIDERS:
             CrossEncoderReranker = _lazy_import_cross_encoder_reranker()
             cls.register_provider("cross_encoder", CrossEncoderReranker)
+
+        if "tei" not in cls._PROVIDERS:
+            TEIReranker = _lazy_import_tei_reranker()
+            cls.register_provider("tei", TEIReranker)
         
         try:
             rerank_settings = settings.rerank

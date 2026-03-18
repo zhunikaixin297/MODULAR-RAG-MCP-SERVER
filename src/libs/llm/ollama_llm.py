@@ -78,6 +78,8 @@ class OllamaLLM(BaseLLM):
         
         # Store any additional kwargs for future use
         self._extra_config = kwargs
+        self._http_client: Any = None
+        self._http_client_owner: Any = None
     
     def chat(
         self,
@@ -184,8 +186,6 @@ class OllamaLLM(BaseLLM):
         Raises:
             OllamaLLMError: If the API call fails.
         """
-        import httpx
-        
         url = f"{self.base_url.rstrip('/')}/api/chat"
         headers = {
             "Content-Type": "application/json",
@@ -204,16 +204,29 @@ class OllamaLLM(BaseLLM):
         }
         
         try:
-            with httpx.Client(timeout=self.timeout) as client:
-                response = client.post(url, json=payload, headers=headers)
-                
-                if response.status_code != 200:
-                    error_detail = self._parse_error_response(response)
-                    raise OllamaLLMError(
-                        f"[Ollama] API error (HTTP {response.status_code}): {error_detail}"
-                    )
-                
-                return response.json()
+            import httpx
+        except ImportError as e:
+            raise OllamaLLMError(
+                "httpx library is required for Ollama LLM. Install with: pip install httpx"
+            ) from e
+
+        try:
+            if self._http_client is None:
+                candidate = httpx.Client(timeout=self.timeout)
+                self._http_client_owner = candidate
+                enter = getattr(candidate, "__enter__", None)
+                if callable(enter):
+                    entered = enter()
+                    self._http_client = entered if entered is not None else candidate
+                else:
+                    self._http_client = candidate
+            response = self._http_client.post(url, json=payload, headers=headers)
+            if response.status_code != 200:
+                error_detail = self._parse_error_response(response)
+                raise OllamaLLMError(
+                    f"[Ollama] API error (HTTP {response.status_code}): {error_detail}"
+                )
+            return response.json()
         except httpx.TimeoutException as e:
             raise OllamaLLMError(
                 f"[Ollama] Request timed out after {self.timeout} seconds. "
@@ -245,3 +258,11 @@ class OllamaLLM(BaseLLM):
             return response.text[:200] if response.text else "Unknown error"
         except Exception:
             return response.text[:200] if response.text else "Unknown error"
+
+    def close(self) -> None:
+        if self._http_client_owner is not None:
+            close_fn = getattr(self._http_client_owner, "close", None)
+            if callable(close_fn):
+                close_fn()
+        self._http_client = None
+        self._http_client_owner = None

@@ -103,6 +103,18 @@ class AzureEmbedding(BaseEmbedding):
         
         # Store any additional kwargs for future use
         self._extra_config = kwargs
+        try:
+            from openai import AzureOpenAI
+        except ImportError as e:
+            raise RuntimeError(
+                "OpenAI Python package not installed. "
+                "Install with: pip install openai"
+            ) from e
+        self._client = AzureOpenAI(
+            api_key=self.api_key,
+            azure_endpoint=self.azure_endpoint,
+            api_version=self.api_version,
+        )
     
     def embed(
         self,
@@ -128,22 +140,6 @@ class AzureEmbedding(BaseEmbedding):
         # Validate input
         self.validate_texts(texts)
         
-        # Import Azure OpenAI client (lazy import to avoid dependency at module level)
-        try:
-            from openai import AzureOpenAI
-        except ImportError as e:
-            raise RuntimeError(
-                "OpenAI Python package not installed. "
-                "Install with: pip install openai"
-            ) from e
-        
-        # Initialize Azure OpenAI client
-        client = AzureOpenAI(
-            api_key=self.api_key,
-            azure_endpoint=self.azure_endpoint,
-            api_version=self.api_version,
-        )
-        
         # Prepare API call parameters
         # Azure uses 'model' parameter but expects deployment name
         api_params = {
@@ -159,7 +155,7 @@ class AzureEmbedding(BaseEmbedding):
         
         # Call Azure OpenAI API
         try:
-            response = client.embeddings.create(**api_params)
+            response = self._client.embeddings.create(**api_params)
         except Exception as e:
             raise AzureEmbeddingError(
                 f"Azure OpenAI Embeddings API call failed: {e}"
@@ -216,3 +212,8 @@ class AzureEmbedding(BaseEmbedding):
         
         # Cannot determine dimension
         return None
+
+    def close(self) -> None:
+        close_fn = getattr(self._client, "close", None)
+        if callable(close_fn):
+            close_fn()

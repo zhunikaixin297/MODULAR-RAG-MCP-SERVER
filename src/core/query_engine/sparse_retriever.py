@@ -85,6 +85,11 @@ class SparseRetriever:
         self.bm25_indexer = bm25_indexer
         self.vector_store = vector_store
         self.default_collection = default_collection
+        self.provider = "chroma"
+        if settings is not None:
+            vector_store_config = getattr(settings, "vector_store", None)
+            if vector_store_config is not None:
+                self.provider = str(getattr(vector_store_config, "provider", "chroma")).lower()
         
         # Extract default_top_k from settings if available
         self.default_top_k = default_top_k
@@ -142,44 +147,52 @@ class SparseRetriever:
             f"top_k={effective_top_k}, collection='{effective_collection}'"
         )
         
-        # Step 1: Ensure index is loaded
-        if not self._ensure_index_loaded(effective_collection):
-            logger.warning(
-                f"BM25 index for collection '{effective_collection}' not available. "
-                "Returning empty results."
-            )
-            return []
-        
-        # Step 2: Query BM25 index
-        try:
-            bm25_results = self.bm25_indexer.query(
-                query_terms=keywords,
-                top_k=effective_top_k,
-                trace=trace,
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to query BM25 index: {e}. "
-                "Check index availability and query terms."
-            ) from e
-        
-        # Early return if no matches
-        if not bm25_results:
-            logger.debug("BM25 query returned no results")
-            return []
-        
-        # Step 3: Fetch text and metadata from vector store
-        chunk_ids = [r["chunk_id"] for r in bm25_results]
-        try:
-            records = self.vector_store.get_by_ids(chunk_ids, trace=trace)
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to fetch records from vector store: {e}. "
-                "Check vector store configuration and data availability."
-            ) from e
-        
-        # Step 4: Merge BM25 scores with text/metadata
-        results = self._merge_results(bm25_results, records)
+        if self.provider == "opensearch":
+            query_text = " ".join([k for k in keywords if k and k.strip()])
+            if not query_text:
+                return []
+            try:
+                raw_results = self.vector_store.keyword_search(
+                    query_text=query_text,
+                    top_k=effective_top_k,
+                    filters=None,
+                    trace=trace,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to query OpenSearch keyword search: {e}"
+                ) from e
+            results = self._transform_keyword_results(raw_results)
+        else:
+            if not self._ensure_index_loaded(effective_collection):
+                logger.warning(
+                    f"BM25 index for collection '{effective_collection}' not available. "
+                    "Returning empty results."
+                )
+                return []
+            try:
+                bm25_results = self.bm25_indexer.query(
+                    query_terms=keywords,
+                    top_k=effective_top_k,
+                    trace=trace,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to query BM25 index: {e}. "
+                    "Check index availability and query terms."
+                ) from e
+            if not bm25_results:
+                logger.debug("BM25 query returned no results")
+                return []
+            chunk_ids = [r["chunk_id"] for r in bm25_results]
+            try:
+                records = self.vector_store.get_by_ids(chunk_ids, trace=trace)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to fetch records from vector store: {e}. "
+                    "Check vector store configuration and data availability."
+                ) from e
+            results = self._merge_results(bm25_results, records)
         
         logger.debug(f"Retrieved {len(results)} results for keywords")
         return results
@@ -208,15 +221,14 @@ class SparseRetriever:
         Raises:
             RuntimeError: If bm25_indexer or vector_store is None.
         """
-        if self.bm25_indexer is None:
-            raise RuntimeError(
-                "SparseRetriever requires a bm25_indexer. "
-                "Provide one during initialization or via setter."
-            )
         if self.vector_store is None:
             raise RuntimeError(
                 "SparseRetriever requires a vector_store. "
                 "Provide one during initialization or via setter."
+            )
+        if self.provider != "opensearch" and self.bm25_indexer is None:
+            raise RuntimeError(
+                "SparseRetriever requires a bm25_indexer for non-OpenSearch providers."
             )
     
     def _ensure_index_loaded(self, collection: str) -> bool:
@@ -288,6 +300,25 @@ class SparseRetriever:
         
         return results
 
+    def _transform_keyword_results(
+        self,
+        raw_results: List[Dict[str, Any]],
+    ) -> List[RetrievalResult]:
+        results: List[RetrievalResult] = []
+        for raw in raw_results:
+            try:
+                results.append(
+                    RetrievalResult(
+                        chunk_id=str(raw.get("chunk_id", raw.get("id", ""))),
+                        score=float(raw.get("score", 0.0)),
+                        text=str(raw.get("text", "")),
+                        metadata=raw.get("metadata", {}),
+                    )
+                )
+            except (ValueError, TypeError):
+                continue
+        return results
+
 
 def create_sparse_retriever(
     settings: Settings,
@@ -315,14 +346,14 @@ def create_sparse_retriever(
         >>> settings = Settings.load('config/settings.yaml')
         >>> retriever = create_sparse_retriever(settings)
     """
-    # Lazy import to avoid circular dependencies
-    if bm25_indexer is None:
-        from src.ingestion.storage.bm25_indexer import BM25Indexer
-        bm25_indexer = BM25Indexer(index_dir=index_dir)
-    
     if vector_store is None:
         from src.libs.vector_store.vector_store_factory import VectorStoreFactory
         vector_store = VectorStoreFactory.create(settings)
+
+    provider = str(getattr(getattr(settings, "vector_store", None), "provider", "chroma")).lower()
+    if provider != "opensearch" and bm25_indexer is None:
+        from src.ingestion.storage.bm25_indexer import BM25Indexer
+        bm25_indexer = BM25Indexer(index_dir=index_dir)
     
     return SparseRetriever(
         settings=settings,
