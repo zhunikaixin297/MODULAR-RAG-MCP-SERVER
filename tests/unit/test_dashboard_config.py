@@ -48,9 +48,9 @@ def _fake_settings():
     s.vision_llm.model = "gpt-4o"
     s.vision_llm.max_image_size = 2048
 
-    s.ingestion.splitter = "recursive"
-    s.ingestion.chunk_size = 1000
-    s.ingestion.chunk_overlap = 200
+    s.splitter.provider = "recursive"
+    s.splitter.chunk_size = 1000
+    s.splitter.chunk_overlap = 200
     s.ingestion.batch_size = 100
 
     return s
