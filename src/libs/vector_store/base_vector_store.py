@@ -253,3 +253,116 @@ class BaseVectorStore(ABC):
             f"{self.__class__.__name__} does not implement get_by_ids() method. "
             "This operation is required for SparseRetriever support."
         )
+
+    def keyword_search(
+        self,
+        query_text: str,
+        top_k: int = 10,
+        filters: Optional[Dict[str, Any]] = None,
+        trace: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement keyword_search() method. "
+            "This operation is optional and provider-dependent."
+        )
+
+    def delete_by_metadata(
+        self,
+        filters: Dict[str, Any],
+        trace: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> int:
+        """Delete records from the vector store by metadata filters.
+        
+        Args:
+            filters: Metadata key/value pairs to match.
+            trace: Optional TraceContext for observability.
+            **kwargs: Provider-specific parameters.
+        
+        Returns:
+            Number of records deleted.
+            
+        Raises:
+            ValueError: If filters is empty.
+            RuntimeError: If the delete operation fails.
+            NotImplementedError: If the provider doesn't support this operation.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement delete_by_metadata() method."
+        )
+
+    def get_ids_by_metadata(
+        self,
+        filters: Dict[str, Any],
+        trace: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> List[str]:
+        """Retrieve record IDs from the vector store by metadata filters.
+        
+        Args:
+            filters: Metadata key/value pairs to match.
+            trace: Optional TraceContext for observability.
+            **kwargs: Provider-specific parameters.
+        
+        Returns:
+            List of matching record IDs.
+            
+        Raises:
+            ValueError: If filters is empty.
+            RuntimeError: If the retrieval operation fails.
+            NotImplementedError: If the provider doesn't support this operation.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_ids_by_metadata() method."
+        )
+
+    def count_by_metadata(
+        self,
+        filters: Dict[str, Any],
+        trace: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> int:
+        """Count records in the vector store by metadata filters.
+        
+        Args:
+            filters: Metadata key/value pairs to match.
+            trace: Optional TraceContext for observability.
+            **kwargs: Provider-specific parameters.
+        
+        Returns:
+            Number of matching records.
+            
+        Raises:
+            ValueError: If filters is empty.
+            RuntimeError: If the count operation fails.
+            NotImplementedError: If the provider doesn't support this operation.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement count_by_metadata() method."
+        )
+
+    def get_by_metadata(
+        self,
+        filters: Dict[str, Any],
+        trace: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve records from the vector store by metadata filters.
+        
+        Args:
+            filters: Metadata key/value pairs to match.
+            trace: Optional TraceContext for observability.
+            **kwargs: Provider-specific parameters.
+        
+        Returns:
+            List of matching records. Each record is a dict with 'id', 'text', 'metadata'.
+            
+        Raises:
+            ValueError: If filters is empty.
+            RuntimeError: If the retrieval operation fails.
+            NotImplementedError: If the provider doesn't support this operation.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement get_by_metadata() method."
+        )
