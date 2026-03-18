@@ -124,6 +124,7 @@ class QueryKnowledgeHubTool:
         self._hybrid_search = hybrid_search
         self._reranker = reranker
         self._embedding_client = None
+        self._vector_store = None
         self._response_builder = response_builder or ResponseBuilder()
         
         # Track initialization state
@@ -155,9 +156,23 @@ class QueryKnowledgeHubTool:
         Args:
             collection: Target collection name.
         """
-        # Always rebuild vector_store and retriever components so that
-        # data ingested by other processes (e.g. Dashboard) is visible
-        # immediately without requiring an MCP Server restart.
+        if (
+            self._initialized
+            and self._current_collection == collection
+            and self._hybrid_search is not None
+        ):
+            return
+        if self._vector_store is not None:
+            close_fn = getattr(self._vector_store, "close", None)
+            if callable(close_fn):
+                close_result = close_fn()
+                if asyncio.iscoroutine(close_result):
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(close_result)
+                    except RuntimeError:
+                        asyncio.run(close_result)
+            self._vector_store = None
         
         logger.info(f"Initializing query components for collection: {collection}")
         
@@ -186,6 +201,7 @@ class QueryKnowledgeHubTool:
             self.settings,
             collection_name=collection,
         )
+        self._vector_store = vector_store
         
         dense_retriever = create_dense_retriever(
             settings=self.settings,
@@ -193,16 +209,17 @@ class QueryKnowledgeHubTool:
             vector_store=vector_store,
         )
         
-        # BM25Indexer just holds the index dir path; the SparseRetriever
-        # calls _ensure_index_loaded() on every search, which always
-        # reloads from disk — so it picks up dashboard-written data.
-        bm25_indexer = BM25Indexer(index_dir=str(resolve_path(f"data/db/bm25/{collection}")))
-        sparse_retriever = create_sparse_retriever(
-            settings=self.settings,
-            bm25_indexer=bm25_indexer,
-            vector_store=vector_store,
-        )
-        sparse_retriever.default_collection = collection
+        sparse_retriever = None
+        sparse_enabled = getattr(getattr(self.settings, "retrieval", None), "sparse_enabled", True)
+        vector_provider = getattr(getattr(self.settings, "vector_store", None), "provider", "chroma").lower()
+        if sparse_enabled and vector_provider == "chroma":
+            bm25_indexer = BM25Indexer(index_dir=str(resolve_path(f"data/db/bm25/{collection}")))
+            sparse_retriever = create_sparse_retriever(
+                settings=self.settings,
+                bm25_indexer=bm25_indexer,
+                vector_store=vector_store,
+            )
+            sparse_retriever.default_collection = collection
         
         query_processor = QueryProcessor()
         self._hybrid_search = create_hybrid_search(
@@ -215,6 +232,16 @@ class QueryKnowledgeHubTool:
         self._current_collection = collection
         self._initialized = True
         logger.info(f"Query components initialized for collection: {collection}")
+
+    async def close(self) -> None:
+        if self._vector_store is None:
+            return
+        close_fn = getattr(self._vector_store, "close", None)
+        if callable(close_fn):
+            close_result = close_fn()
+            if asyncio.iscoroutine(close_result):
+                await close_result
+        self._vector_store = None
     
     async def execute(
         self,
