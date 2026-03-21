@@ -179,7 +179,7 @@ class ImageStorage:
         if collection:
             collection_dir = self.images_root / collection
         else:
-            collection_dir = self.images_root / "default"
+            collection_dir = self.images_root / "base"
         
         collection_dir.mkdir(parents=True, exist_ok=True)
         

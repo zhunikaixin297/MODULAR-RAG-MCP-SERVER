@@ -73,8 +73,7 @@ def parse_args() -> argparse.Namespace:
     
     parser.add_argument(
         "--collection", "-c",
-        default="default",
-        help="Collection name for organizing documents (default: 'default')"
+        help="Collection name for organizing documents (if not provided, uses collection_name from settings.yaml)"
     )
     
     parser.add_argument(
@@ -234,13 +233,18 @@ def main() -> int:
     
     # Initialize pipeline
     print(f"\n[INFO] Initializing pipeline...")
-    print(f"   Collection: {args.collection}")
+    
+    # Use default collection from settings if not provided via command line
+    effective_collection = args.collection or getattr(
+        getattr(settings, "vector_store", None), "collection_name", "default"
+    )
+    print(f"   Collection: {effective_collection}")
     print(f"   Force: {args.force}")
     
     try:
         pipeline = IngestionPipeline(
             settings=settings,
-            collection=args.collection,
+            collection=effective_collection,
             force=args.force
         )
     except Exception as e:

@@ -331,7 +331,7 @@ def _evaluate_single_trace(
         evaluator = EvaluatorFactory.create(settings)
 
         # Re-run retrieval
-        collection = meta.get("collection", "default")
+        collection = meta.get("collection", "base")
         top_k = meta.get("top_k", 10)
         chunks = _retrieve_chunks(settings, query, top_k, collection)
 

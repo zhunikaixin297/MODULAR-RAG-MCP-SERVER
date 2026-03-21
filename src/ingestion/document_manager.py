@@ -192,7 +192,7 @@ class DocumentManager:
     def delete_document(
         self,
         source_path: str,
-        collection: str = "default",
+        collection: str = "base",
         source_hash: Optional[str] = None,
     ) -> DeleteResult:
         """Delete a document from all storage backends.

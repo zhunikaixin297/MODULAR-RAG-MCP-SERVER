@@ -225,7 +225,7 @@ class ListCollectionsTool:
 
         vector_store = getattr(self.settings, "vector_store", None)
         opensearch_config = getattr(vector_store, "opensearch", None)
-        base_index = getattr(opensearch_config, "index_name", "default")
+        base_index = getattr(opensearch_config, "index_name", "base")
         system_indices_prefixes = (".", "security-auditlog")
 
         try:

@@ -89,7 +89,7 @@ class ChromaStore(BaseVectorStore):
         # Collection name (allow override)
         self.collection_name = kwargs.get(
             'collection_name',
-            getattr(vector_store_config, 'collection_name', 'knowledge_hub')
+            getattr(vector_store_config, 'collection_name', 'base')
         )
         
         # Persist directory (allow override)
