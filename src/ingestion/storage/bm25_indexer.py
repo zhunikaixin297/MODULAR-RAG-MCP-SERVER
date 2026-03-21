@@ -100,7 +100,7 @@ class BM25Indexer:
     def build(
         self,
         term_stats: List[Dict[str, Any]],
-        collection: str = "default",
+        collection: str = "base",
         trace: Optional[Any] = None,
     ) -> None:
         """Build BM25 index from term statistics.
@@ -114,7 +114,7 @@ class BM25Indexer:
         Args:
             term_stats: List of statistics from SparseEncoder.encode()
                 Each item should have: chunk_id, term_frequencies, doc_length
-            collection: Collection name for organizing indexes (default: "default")
+            collection: Collection name for organizing indexes (default: "base")
             trace: Optional TraceContext for observability
         
         Raises:
@@ -186,7 +186,7 @@ class BM25Indexer:
     
     def load(
         self,
-        collection: str = "default",
+        collection: str = "base",
         trace: Optional[Any] = None,
     ) -> bool:
         """Load index from disk.
@@ -293,7 +293,7 @@ class BM25Indexer:
     def rebuild(
         self,
         term_stats: List[Dict[str, Any]],
-        collection: str = "default",
+        collection: str = "base",
         trace: Optional[Any] = None,
     ) -> None:
         """Rebuild index from scratch (alias for build with clear intent).
@@ -311,7 +311,7 @@ class BM25Indexer:
     def add_documents(
         self,
         term_stats: List[Dict[str, Any]],
-        collection: str = "default",
+        collection: str = "base",
         doc_id: Optional[str] = None,
         trace: Optional[Any] = None,
     ) -> None:
@@ -364,7 +364,7 @@ class BM25Indexer:
     def remove_document(
         self,
         doc_id: str,
-        collection: str = "default",
+        collection: str = "base",
     ) -> bool:
         """Remove all postings for a document from the BM25 index.
 

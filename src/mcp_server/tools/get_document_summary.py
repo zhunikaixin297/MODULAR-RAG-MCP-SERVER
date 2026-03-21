@@ -101,7 +101,7 @@ class GetDocumentSummaryConfig:
         summary_max_length: Maximum characters for summary preview
     """
     persist_directory: str = "./data/db/chroma"
-    default_collection: str = "knowledge_hub"
+    default_collection: str = "base"
     summary_max_length: int = 500
 
 
@@ -171,11 +171,11 @@ class GetDocumentSummaryTool:
                 default_collection = getattr(
                     self.settings.vector_store,
                     'collection_name',
-                    'knowledge_hub'
+                    'base'
                 )
             except AttributeError:
                 persist_dir = './data/db/chroma'
-                default_collection = 'knowledge_hub'
+                default_collection = 'base'
             
             self._config = GetDocumentSummaryConfig(
                 persist_directory=persist_dir,

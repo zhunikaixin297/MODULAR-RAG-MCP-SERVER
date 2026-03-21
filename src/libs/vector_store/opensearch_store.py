@@ -37,7 +37,7 @@ class OpenSearchStore(BaseVectorStore):
                 "Please ensure 'vector_store.opensearch' is specified in settings.yaml"
             ) from e
 
-        base_index_name = getattr(opensearch_config, "index_name", "default")
+        base_index_name = getattr(opensearch_config, "index_name", "base")
         collection_name = kwargs.get("collection_name") or getattr(
             getattr(settings, "vector_store", None), "collection_name", None
         )

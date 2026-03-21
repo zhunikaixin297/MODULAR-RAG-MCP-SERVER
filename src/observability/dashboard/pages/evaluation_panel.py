@@ -230,7 +230,7 @@ def _execute_evaluation(
     evaluator = EvaluatorFactory.create(settings_with_override)
 
     # Try to create HybridSearch (optional – works without if not configured)
-    target_collection = collection or "default"
+    target_collection = collection or "base"
     hybrid_search = _try_create_hybrid_search(settings, target_collection)
 
     # Create reranker if enabled
@@ -262,7 +262,7 @@ def _execute_evaluation(
     return report.to_dict()
 
 
-def _try_create_hybrid_search(settings: Any, collection: str = "default") -> Any:
+def _try_create_hybrid_search(settings: Any, collection: str = "base") -> Any:
     """Attempt to create a HybridSearch instance.
 
     Returns None if required dependencies are not available

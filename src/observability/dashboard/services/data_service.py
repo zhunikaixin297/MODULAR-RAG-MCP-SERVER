@@ -41,7 +41,9 @@ class DataService:
                         re-created if the requested collection differs from
                         the currently loaded one.
         """
-        target_collection = collection or "default"
+        from src.core.settings import load_settings, resolve_path
+        settings = load_settings()
+        target_collection = collection or getattr(settings.vector_store, "collection_name", "base")
 
         # Re-create chroma if collection changed
         if (
@@ -50,14 +52,12 @@ class DataService:
         ):
             return
 
-        from src.core.settings import load_settings, resolve_path
         from src.ingestion.document_manager import DocumentManager
         from src.ingestion.storage.bm25_indexer import BM25Indexer
         from src.ingestion.storage.image_storage import ImageStorage
         from src.libs.loader.file_integrity import SQLiteIntegrityChecker
         from src.libs.vector_store.vector_store_factory import VectorStoreFactory
 
-        settings = load_settings()
         self._provider = str(getattr(settings.vector_store, "provider", "chroma")).lower()
 
         chroma = VectorStoreFactory.create(
@@ -114,7 +114,7 @@ class DataService:
             return sorted(c.name for c in client.list_collections())
         except Exception as exc:
             logger.warning("Failed to list collections: %s", exc)
-            return ["default"]
+            return [getattr(settings.vector_store, "collection_name", "base")]
 
     def list_documents(
         self, collection: Optional[str] = None
@@ -177,9 +177,15 @@ class DataService:
         Returns a ``DeleteResult`` dataclass.
         """
         self._ensure_stores(collection)
+        
+        # Determine the collection to delete from
+        from src.core.settings import load_settings
+        settings = load_settings()
+        target_collection = collection or getattr(settings.vector_store, "collection_name", "base")
+        
         return self._manager.delete_document(
             source_path,
-            collection or "default",
+            target_collection,
             source_hash=source_hash,
         )
 

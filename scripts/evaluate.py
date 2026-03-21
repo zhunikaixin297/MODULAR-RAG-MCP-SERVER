@@ -108,7 +108,7 @@ def main() -> int:
             from src.libs.embedding.embedding_factory import EmbeddingFactory
             from src.libs.vector_store.vector_store_factory import VectorStoreFactory
 
-            collection = args.collection or "default"
+            collection = args.collection or getattr(settings.vector_store, "collection_name", "base")
 
             vector_store = VectorStoreFactory.create(
                 settings, collection_name=collection,

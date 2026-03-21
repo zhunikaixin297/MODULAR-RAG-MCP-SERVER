@@ -90,13 +90,13 @@ def render() -> None:
             key="ingest_uploader",
         )
     with col2:
-        collection = st.text_input("Collection", value="default", key="ingest_collection")
+        collection = st.text_input("Collection", value="base", key="ingest_collection")
 
     if uploaded is not None:
         if st.button("🚀 Start Ingestion", key="btn_ingest"):
             progress_bar = st.progress(0, text="Preparing…")
             status_text = st.empty()
-            _run_ingestion(uploaded, collection.strip() or "default", progress_bar, status_text)
+            _run_ingestion(uploaded, collection.strip() or "base", progress_bar, status_text)
 
     st.divider()
 
@@ -131,7 +131,7 @@ def render() -> None:
                 try:
                     result = svc.delete_document(
                         source_path=doc["source_path"],
-                        collection=doc.get("collection", "default"),
+                        collection=doc.get("collection", "base"),
                         source_hash=doc.get("source_hash"),
                     )
                     if result.success:

@@ -71,8 +71,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--collection", "-c",
-        default="default",
-        help="Collection name (default: 'default')"
+        help="Collection name (if not provided, uses collection_name from settings.yaml)"
     )
 
     parser.add_argument(
@@ -256,10 +255,15 @@ def main() -> int:
 
     print("[*] Modular RAG Query Script")
     print("=" * 60)
-    print(f"Collection: {args.collection}")
+    
+    # Use default collection from settings if not provided via command line
+    effective_collection = args.collection or getattr(
+        getattr(settings, "vector_store", None), "collection_name", "default"
+    )
+    print(f"Collection: {effective_collection}")
 
     try:
-        hybrid_search, reranker = _build_components(settings, args.collection)
+        hybrid_search, reranker = _build_components(settings, effective_collection)
     except Exception as e:
         print(f"[FAIL] Failed to initialize query components: {e}")
         logger.exception("Query initialization failed")

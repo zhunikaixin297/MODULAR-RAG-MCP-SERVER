@@ -309,7 +309,7 @@ class Settings:
                 hosts = [f"{scheme}://{host}:{port}"]
             opensearch_settings = OpenSearchSettings(
                 hosts=[str(item) for item in hosts],
-                index_name=str(opensearch.get("index_name", "knowledge_hub")),
+                index_name=str(opensearch.get("index_name", "base")),
                 username=opensearch.get("username"),
                 password=opensearch.get("password"),
                 use_ssl=bool(opensearch.get("use_ssl", False)),

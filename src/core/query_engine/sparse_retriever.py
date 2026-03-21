@@ -47,7 +47,7 @@ class SparseRetriever:
         >>> 
         >>> settings = Settings.load('config/settings.yaml')
         >>> bm25_indexer = BM25Indexer(index_dir="data/db/bm25")
-        >>> bm25_indexer.load("default")
+        >>> bm25_indexer.load("base")
         >>> vector_store = VectorStoreFactory.create(settings)
         >>> 
         >>> retriever = SparseRetriever(
@@ -64,7 +64,7 @@ class SparseRetriever:
         bm25_indexer: Optional[BM25Indexer] = None,
         vector_store: Optional[BaseVectorStore] = None,
         default_top_k: int = 10,
-        default_collection: str = "default",
+        default_collection: str = "base",
     ) -> None:
         """Initialize SparseRetriever with dependencies.
         
@@ -76,7 +76,7 @@ class SparseRetriever:
                           Required for actual retrieval operations.
             default_top_k: Default number of results to return (default: 10).
                            Can be overridden from settings.retrieval.sparse_top_k.
-            default_collection: Default BM25 index collection name (default: "default").
+            default_collection: Default BM25 index collection name (default: "base").
         
         Note:
             Dependencies can be injected for testing (with mocks) or for
@@ -90,6 +90,9 @@ class SparseRetriever:
             vector_store_config = getattr(settings, "vector_store", None)
             if vector_store_config is not None:
                 self.provider = str(getattr(vector_store_config, "provider", "chroma")).lower()
+                # Override default collection from settings if it's the hardcoded default
+                if self.default_collection == "base":
+                    self.default_collection = getattr(vector_store_config, "collection_name", "base")
         
         # Extract default_top_k from settings if available
         self.default_top_k = default_top_k

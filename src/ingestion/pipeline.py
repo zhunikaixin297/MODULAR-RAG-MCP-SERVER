@@ -122,7 +122,7 @@ class IngestionPipeline:
     def __init__(
         self,
         settings: Settings,
-        collection: str = "default",
+        collection: Optional[str] = None,
         force: bool = False
     ):
         """Initialize pipeline with all components.
@@ -133,7 +133,7 @@ class IngestionPipeline:
             force: If True, re-process even if file was previously processed
         """
         self.settings = settings
-        self.collection = collection
+        self.collection = collection or getattr(settings.vector_store, "collection_name", "base")
         self.force = force
         
         # Initialize all components
@@ -147,7 +147,7 @@ class IngestionPipeline:
         self.loader = LoaderFactory.create(
             settings,
             extract_images=True,
-            image_storage_dir=str(resolve_path(f"data/images/{collection}"))
+            image_storage_dir=str(resolve_path(f"data/images/{self.collection}"))
         )
         logger.info("  ✓ Loader initialized")
         
@@ -186,10 +186,10 @@ class IngestionPipeline:
         logger.info(f"  ✓ BatchProcessor initialized (batch_size={batch_size})")
         
         # Stage 6: Storage
-        self.vector_upserter = VectorUpserter(settings, collection_name=collection)
-        logger.info(f"  ✓ VectorUpserter initialized (provider={settings.vector_store.provider}, collection={collection})")
+        self.vector_upserter = VectorUpserter(settings, collection_name=self.collection)
+        logger.info(f"  ✓ VectorUpserter initialized (provider={settings.vector_store.provider}, collection={self.collection})")
         
-        self.bm25_indexer = BM25Indexer(index_dir=str(resolve_path(f"data/db/bm25/{collection}"))) if bm25_enabled else None
+        self.bm25_indexer = BM25Indexer(index_dir=str(resolve_path(f"data/db/bm25/{self.collection}"))) if bm25_enabled else None
         logger.info(f"  ✓ BM25Indexer initialized (enabled={bm25_enabled})")
         
         self.image_storage = ImageStorage(
@@ -591,7 +591,7 @@ class IngestionPipeline:
             
         except Exception as e:
             logger.error(f"❌ Pipeline failed: {e}", exc_info=True)
-            self.integrity_checker.mark_failed(file_hash, str(file_path), str(e))
+            self.integrity_checker.mark_failed(file_hash, str(file_path), str(e), self.collection)
             
             return PipelineResult(
                 success=False,
@@ -610,7 +610,7 @@ class IngestionPipeline:
 def run_pipeline(
     file_path: str,
     settings_path: Optional[str] = None,
-    collection: str = "default",
+    collection: Optional[str] = None,
     force: bool = False
 ) -> PipelineResult:
     """Convenience function to run the pipeline.
@@ -625,7 +625,8 @@ def run_pipeline(
         PipelineResult with execution details
     """
     settings = load_settings(settings_path)
-    pipeline = IngestionPipeline(settings, collection=collection, force=force)
+    effective_collection = collection or getattr(settings.vector_store, "collection_name", "base")
+    pipeline = IngestionPipeline(settings, collection=effective_collection, force=force)
     
     try:
         return pipeline.run(file_path)

@@ -28,8 +28,8 @@ def render() -> None:
 
     # ── Collection selector ────────────────────────────────────────
     collections = svc.list_collections()
-    if "default" not in collections:
-        collections.insert(0, "default")
+    if "base" not in collections:
+        collections.insert(0, "base")
     collection = st.selectbox(
         "Collection",
         options=collections,
