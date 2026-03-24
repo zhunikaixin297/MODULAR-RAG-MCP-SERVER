@@ -123,9 +123,9 @@ python scripts/start_dashboard.py
 
 ## 🤝 致谢与二次开发声明
 
-本项目基于开源项目 **Modular-RAG-MCP-Server** (原作者：\[不转到大模型不改名]) 进行二次开发与企业级改造。
+本项目基于开源项目 **Modular-RAG-MCP-Server** 进行二次开发与企业级改造。
 
-**在此基础上，我们进行了以下核心架构升级与扩展：**
+**在此基础上，进行了以下核心架构升级与扩展：**
 
 1. **引入 Docling 高精度解析引擎**：替换了原有的 PyMuPDF，大幅提升了对复杂 PDF（尤其是多层级标题、表格）的结构识别能力，并完善了图片提取管线。
 2. **实现 Semantic Markdown Splitter**：彻底改变了单纯依赖字符长度的递归切分逻辑，转为基于文档语义标题的智能切块。
@@ -133,4 +133,4 @@ python scripts/start_dashboard.py
 4. **TEI 推理加速**：集成了 Hugging Face Text Embeddings Inference，将 Cross-Encoder 重排序的延迟降低至生产可用水平。
 5. **MCP SSE 传输支持**：在原有的 Stdio 基础上增加了 Server-Sent Events (SSE) 传输支持，使系统具备了云端部署和跨网络调用的能力。
 
-感谢原作者提供的优秀模块化骨架与 Agent Skill 驱动的工程化思想，使得本次企业级架构演进得以快速且优雅地落地。
+感谢原作者提供的优秀模块化骨架，使得本次企业级架构演进得以快速且优雅地落地。
