@@ -70,10 +70,7 @@ class VectorUpserter:
         self.collection_name = collection_name or getattr(
             getattr(settings, "vector_store", None), "collection_name", None
         )
-        kwargs = {}
-        if self.collection_name:
-            kwargs['collection_name'] = self.collection_name
-        self.vector_store = VectorStoreFactory.create(settings, **kwargs)
+        self.vector_store = VectorStoreFactory.create(settings)
     
     def upsert(
         self,
@@ -144,7 +141,11 @@ class VectorUpserter:
         
         # Perform idempotent upsert
         try:
-            self.vector_store.upsert(records, trace=trace)
+            self.vector_store.upsert(
+                records,
+                collection=self.collection_name,
+                trace=trace,
+            )
         except Exception as e:
             raise RuntimeError(
                 f"Vector store upsert failed: {str(e)}"

@@ -388,9 +388,7 @@ def _retrieve_chunks(
         from src.libs.embedding.embedding_factory import EmbeddingFactory
         from src.libs.vector_store.vector_store_factory import VectorStoreFactory
 
-        vector_store = VectorStoreFactory.create(
-            settings, collection_name=collection,
-        )
+        vector_store = VectorStoreFactory.create(settings)
         embedding_client = EmbeddingFactory.create(settings)
         dense_retriever = create_dense_retriever(
             settings=settings,
@@ -398,13 +396,12 @@ def _retrieve_chunks(
             vector_store=vector_store,
         )
         from src.core.settings import resolve_path
-        bm25_indexer = BM25Indexer(index_dir=str(resolve_path(f"data/db/bm25/{collection}")))
+        bm25_indexer = BM25Indexer(index_dir=str(resolve_path("data/db/bm25")))
         sparse_retriever = create_sparse_retriever(
             settings=settings,
             bm25_indexer=bm25_indexer,
             vector_store=vector_store,
         )
-        sparse_retriever.default_collection = collection
         query_processor = QueryProcessor()
         hybrid_search = create_hybrid_search(
             settings=settings,
@@ -417,7 +414,11 @@ def _retrieve_chunks(
         reranker = create_core_reranker(settings=settings)
         initial_top_k = top_k * 2 if reranker.is_enabled else top_k
 
-        results = hybrid_search.search(query=query, top_k=initial_top_k)
+        results = hybrid_search.search(
+            query=query,
+            top_k=initial_top_k,
+            filters={"collection": collection},
+        )
         results = results if isinstance(results, list) else results.results
 
         # Apply reranking if enabled

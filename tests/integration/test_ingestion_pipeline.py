@@ -1,10 +1,10 @@
 """Integration tests for the Ingestion Pipeline.
 
-This module tests the complete ingestion flow using real Azure services:
-- Azure LLM (gpt-4o) for chunk refinement and metadata enrichment
-- Azure Vision LLM (gpt-4o) for image captioning
-- Azure Embedding (text-embedding-ada-002) for dense vectors
-- ChromaDB for vector storage
+This module tests the complete ingestion flow against the active project settings:
+- Configured LLM for chunk refinement and metadata enrichment
+- Configured Vision LLM for image captioning (if enabled)
+- Configured embedding model for dense vectors
+- Vector storage backend
 - BM25 indexer for sparse retrieval
 
 Test Data:
@@ -136,22 +136,28 @@ class TestIngestionPipeline:
             assert "encoding" in stages
             encoding = stages["encoding"]
             assert encoding["dense_vector_count"] == result.chunk_count
-            assert encoding["dense_dimension"] == 1536, "Azure ada-002 should produce 1536-dim vectors"
+            assert encoding["dense_dimension"] == settings.embedding.dimensions
             print(f"[OK] Dense vectors: {encoding['dense_vector_count']} x {encoding['dense_dimension']}dim")
             
             # Storage stage
             assert "storage" in stages
             storage = stages["storage"]
             assert storage["vector_count"] == result.chunk_count
-            assert storage["bm25_docs"] == result.chunk_count
+            provider = str(getattr(settings.vector_store, "provider", "")).lower()
+            if provider == "chroma":
+                # BM25 is expected in local sparse pipeline mode.
+                assert storage["bm25_docs"] == result.chunk_count
+            else:
+                # For backends like OpenSearch, sparse retrieval can be delegated to backend-native search.
+                assert storage["bm25_docs"] >= 0
             print(f"[OK] Storage: {storage['vector_count']} vectors, {storage['bm25_docs']} BM25 docs")
             
             # Verify files were created
             chroma_dir = Path(settings.vector_store.persist_directory)
             assert chroma_dir.exists(), "ChromaDB directory should exist"
             
-            bm25_dir = Path(f"data/db/bm25/{collection}")
-            assert bm25_dir.exists(), "BM25 index directory should exist"
+            bm25_root = Path("data/db/bm25")
+            assert bm25_root.exists(), "BM25 index root directory should exist"
             
             print("\n" + "=" * 60)
             print("SUCCESS - All pipeline stages completed!")
@@ -222,23 +228,24 @@ class TestPipelineComponents:
         return load_settings("config/settings.yaml")
     
     def test_settings_loads_correctly(self, settings):
-        """Verify settings are loaded with expected values."""
+        """Verify settings are loaded with minimally required values."""
         # LLM settings
-        assert settings.llm.provider == "azure"
-        assert settings.llm.model == "gpt-4o"
+        assert settings.llm.provider
+        assert settings.llm.model
         print(f"[OK] LLM: {settings.llm.provider}/{settings.llm.model}")
         
         # Embedding settings
-        assert settings.embedding.provider == "azure"
-        assert settings.embedding.model == "text-embedding-ada-002"
-        assert settings.embedding.dimensions == 1536
+        assert settings.embedding.provider
+        assert settings.embedding.model
+        assert settings.embedding.dimensions > 0
         print(f"[OK] Embedding: {settings.embedding.provider}/{settings.embedding.model}")
         
         # Vision LLM settings
-        assert settings.vision_llm is not None
-        assert settings.vision_llm.enabled == True
-        assert settings.vision_llm.provider == "azure"
-        print(f"[OK] Vision LLM: {settings.vision_llm.provider}/{settings.vision_llm.model}")
+        if settings.vision_llm is not None and settings.vision_llm.enabled:
+            assert settings.vision_llm.provider
+            print(f"[OK] Vision LLM: {settings.vision_llm.provider}/{settings.vision_llm.model}")
+        else:
+            print("[OK] Vision LLM: disabled")
         
         # Ingestion settings
         assert settings.ingestion is not None
@@ -249,7 +256,7 @@ class TestPipelineComponents:
         print("[OK] Ingestion LLM enhancement: enabled")
     
     def test_embedding_creates_vectors(self, settings):
-        """Test that Azure embedding service works."""
+        """Test that configured embedding service works."""
         from src.libs.embedding.embedding_factory import EmbeddingFactory
         
         embedding = EmbeddingFactory.create(settings)
@@ -258,11 +265,11 @@ class TestPipelineComponents:
         vectors = embedding.embed(texts)
         
         assert len(vectors) == 2
-        assert len(vectors[0]) == 1536  # ada-002 dimension
+        assert len(vectors[0]) == settings.embedding.dimensions
         print(f"[OK] Embedding test: produced {len(vectors)} vectors of dim {len(vectors[0])}")
     
     def test_llm_responds(self, settings):
-        """Test that Azure LLM service works."""
+        """Test that configured LLM service works."""
         from src.libs.llm.llm_factory import LLMFactory
         from src.libs.llm.base_llm import Message
         

@@ -48,18 +48,21 @@ class MockDenseRetriever:
         self.call_count = 0
         self.last_query = None
         self.last_top_k = None
+        self.last_collection = None
         self.last_filters = None
     
     def retrieve(
         self,
         query: str,
         top_k: int = 10,
+        collection: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         trace: Optional[Any] = None,
     ) -> List[RetrievalResult]:
         self.call_count += 1
         self.last_query = query
         self.last_top_k = top_k
+        self.last_collection = collection
         self.last_filters = filters
         
         if self.should_fail:
@@ -494,7 +497,37 @@ class TestHybridSearchFilters:
         
         hybrid.search("Azure", top_k=5, filters={"collection": "api-docs"})
         
-        assert dense.last_filters == {"collection": "api-docs"}
+        # Collection is routed as a dedicated parameter, not metadata filter.
+        assert dense.last_collection == "api-docs"
+        assert dense.last_filters == {}
+        assert sparse.last_collection == "api-docs"
+
+    def test_collection_routed_and_metadata_filter_preserved(
+        self,
+        query_processor: QueryProcessor,
+        rrf_fusion: RRFFusion,
+        sample_dense_results: List[RetrievalResult],
+        sample_sparse_results: List[RetrievalResult],
+    ):
+        """Collection should route separately while non-collection filters remain for dense path."""
+        dense = MockDenseRetriever(results=sample_dense_results)
+        sparse = MockSparseRetriever(results=sample_sparse_results)
+
+        hybrid = HybridSearch(
+            query_processor=query_processor,
+            dense_retriever=dense,
+            sparse_retriever=sparse,
+            fusion=rrf_fusion,
+        )
+
+        hybrid.search(
+            "Azure",
+            top_k=5,
+            filters={"collection": "api-docs", "source_type": "manual"},
+        )
+
+        assert dense.last_collection == "api-docs"
+        assert dense.last_filters == {"source_type": "manual"}
         assert sparse.last_collection == "api-docs"
     
     def test_query_filter_syntax_extraction(
@@ -541,12 +574,42 @@ class TestHybridSearchFilters:
             config=config,
         )
         
-        # Filter for api-docs collection only
-        results = hybrid.search("Azure", top_k=10, filters={"collection": "api-docs"})
+        # Filter by a real metadata field
+        results = hybrid.search("Azure", top_k=10, filters={"source_path": "docs/azure.pdf"})
         
-        # All results should have collection=api-docs
+        # All results should have source_path=docs/azure.pdf
         for r in results:
-            assert r.metadata.get("collection") == "api-docs"
+            assert r.metadata.get("source_path") == "docs/azure.pdf"
+
+    def test_collection_filter_does_not_drop_results_when_metadata_lacks_collection(
+        self,
+        query_processor: QueryProcessor,
+        rrf_fusion: RRFFusion,
+    ):
+        """Collection should route retrieval even when metadata has no collection field."""
+        dense = MockDenseRetriever(
+            results=[
+                RetrievalResult(
+                    chunk_id="dense_no_collection_1",
+                    score=0.93,
+                    text="Routing-only collection result",
+                    metadata={"source_path": "docs/routing.pdf"},
+                )
+            ]
+        )
+        sparse = MockSparseRetriever(results=[])
+
+        hybrid = HybridSearch(
+            query_processor=query_processor,
+            dense_retriever=dense,
+            sparse_retriever=sparse,
+            fusion=rrf_fusion,
+        )
+
+        results = hybrid.search("routing", top_k=5, filters={"collection": "modular_rag_project"})
+
+        assert dense.last_collection == "modular_rag_project"
+        assert len(results) == 1
 
 
 # =============================================================================

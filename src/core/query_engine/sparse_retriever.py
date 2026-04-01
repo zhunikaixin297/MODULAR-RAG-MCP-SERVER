@@ -64,7 +64,7 @@ class SparseRetriever:
         bm25_indexer: Optional[BM25Indexer] = None,
         vector_store: Optional[BaseVectorStore] = None,
         default_top_k: int = 10,
-        default_collection: str = "base",
+        default_collection: str = "default",
     ) -> None:
         """Initialize SparseRetriever with dependencies.
         
@@ -76,7 +76,7 @@ class SparseRetriever:
                           Required for actual retrieval operations.
             default_top_k: Default number of results to return (default: 10).
                            Can be overridden from settings.retrieval.sparse_top_k.
-            default_collection: Default BM25 index collection name (default: "base").
+            default_collection: Default BM25 index collection name (default: "default").
         
         Note:
             Dependencies can be injected for testing (with mocks) or for
@@ -91,7 +91,7 @@ class SparseRetriever:
             if vector_store_config is not None:
                 self.provider = str(getattr(vector_store_config, "provider", "chroma")).lower()
                 # Override default collection from settings if it's the hardcoded default
-                if self.default_collection == "base":
+                if self.default_collection == "default":
                     self.default_collection = getattr(vector_store_config, "collection_name", "base")
         
         # Extract default_top_k from settings if available
@@ -158,6 +158,7 @@ class SparseRetriever:
                 raw_results = self.vector_store.keyword_search(
                     query_text=query_text,
                     top_k=effective_top_k,
+                    collection=effective_collection,
                     filters=None,
                     trace=trace,
                 )
@@ -189,7 +190,11 @@ class SparseRetriever:
                 return []
             chunk_ids = [r["chunk_id"] for r in bm25_results]
             try:
-                records = self.vector_store.get_by_ids(chunk_ids, trace=trace)
+                records = self.vector_store.get_by_ids(
+                    chunk_ids,
+                    collection=effective_collection,
+                    trace=trace,
+                )
             except Exception as e:
                 raise RuntimeError(
                     f"Failed to fetch records from vector store: {e}. "

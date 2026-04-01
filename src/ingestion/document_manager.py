@@ -121,7 +121,7 @@ class DocumentManager:
             coll = rec.get("collection")
 
             # Count chunks in VectorStore
-            chunk_count = self._count_chunks(source_hash)
+            chunk_count = self._count_chunks(source_hash, collection=coll)
 
             # Count images
             image_count = self._count_images(source_hash)
@@ -169,7 +169,10 @@ class DocumentManager:
         source_hash = record["file_hash"]
 
         # Collect chunk IDs from VectorStore
-        chunk_ids = self._get_chunk_ids(source_hash)
+        chunk_ids = self._get_chunk_ids(
+            source_hash,
+            collection=record.get("collection"),
+        )
 
         # Collect image IDs
         image_ids = self._get_image_ids(source_hash)
@@ -232,7 +235,8 @@ class DocumentManager:
         # 1. VectorStore – delete chunks matching source_hash
         try:
             count = self.vector_store.delete_by_metadata(
-                {"doc_hash": source_hash}
+                {"doc_hash": source_hash},
+                collection=collection,
             )
             result.chunks_deleted = count
         except Exception as e:
@@ -301,20 +305,22 @@ class DocumentManager:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _count_chunks(self, source_hash: str) -> int:
+    def _count_chunks(self, source_hash: str, collection: Optional[str] = None) -> int:
         """Count chunks in VectorStore that belong to *source_hash*."""
         try:
             return self.vector_store.count_by_metadata(
-                {"doc_hash": source_hash}
+                {"doc_hash": source_hash},
+                collection=collection,
             )
         except Exception:
             return 0
 
-    def _get_chunk_ids(self, source_hash: str) -> List[str]:
+    def _get_chunk_ids(self, source_hash: str, collection: Optional[str] = None) -> List[str]:
         """Return chunk IDs from VectorStore matching *source_hash*."""
         try:
             return self.vector_store.get_ids_by_metadata(
-                {"doc_hash": source_hash}
+                {"doc_hash": source_hash},
+                collection=collection,
             )
         except Exception:
             return []

@@ -251,11 +251,17 @@ class HybridSearch:
         
         # Merge explicit filters with query-extracted filters
         merged_filters = self._merge_filters(processed_query.filters, filters)
+
+        # Route collection separately (collections are handled by the store, not metadata)
+        collection = merged_filters.get("collection") if merged_filters else None
+        cleaned_filters = dict(merged_filters) if merged_filters else {}
+        cleaned_filters.pop("collection", None)
         
         # Step 2: Run retrievals
         dense_ranking_lists, sparse_results, dense_error, sparse_error = self._run_retrievals(
             processed_query=processed_query,
-            filters=merged_filters,
+            filters=cleaned_filters,
+            collection=collection,
             trace=trace,
         )
         dense_results = dense_ranking_lists[0] if dense_ranking_lists else []
@@ -283,8 +289,9 @@ class HybridSearch:
         )
         
         # Step 5: Apply post-fusion metadata filters (if any)
-        if merged_filters and self.config.metadata_filter_post:
-            fused_results = self._apply_metadata_filters(fused_results, merged_filters)
+        # Collection is routing-only and should not be reapplied as metadata filter.
+        if cleaned_filters and self.config.metadata_filter_post:
+            fused_results = self._apply_metadata_filters(fused_results, cleaned_filters)
         
         # Step 6: Limit to top_k
         final_results = fused_results[:effective_top_k]
@@ -350,6 +357,7 @@ class HybridSearch:
         self,
         processed_query: ProcessedQuery,
         filters: Optional[Dict[str, Any]],
+        collection: Optional[str],
         trace: Optional[Any],
     ) -> Tuple[
         List[List[RetrievalResult]],
@@ -394,17 +402,17 @@ class HybridSearch:
         
         if self.config.parallel_retrieval and run_dense and run_sparse:
             dense_ranking_lists, sparse_results, dense_error, sparse_error = (
-                self._run_parallel_retrievals(processed_query, filters, trace)
+                self._run_parallel_retrievals(processed_query, filters, collection, trace)
             )
         else:
             if run_dense:
                 dense_ranking_lists, dense_error = self._run_dense_retrieval(
-                    processed_query.original_query, filters, trace
+                    processed_query.original_query, filters, trace, collection
                 )
             
             if run_sparse:
                 sparse_results, sparse_error = self._run_sparse_retrieval(
-                    processed_query.keywords, filters, trace
+                    processed_query.keywords, filters, trace, collection
                 )
         
         return dense_ranking_lists, sparse_results, dense_error, sparse_error
@@ -413,6 +421,7 @@ class HybridSearch:
         self,
         processed_query: ProcessedQuery,
         filters: Optional[Dict[str, Any]],
+        collection: Optional[str],
         trace: Optional[Any],
     ) -> Tuple[
         List[List[RetrievalResult]],
@@ -444,6 +453,7 @@ class HybridSearch:
                 processed_query.original_query,
                 filters,
                 trace,
+                collection,
             )
             
             # Submit sparse retrieval
@@ -452,8 +462,9 @@ class HybridSearch:
                 processed_query.keywords,
                 filters,
                 trace,
+                collection,
             )
-            
+
             # Collect results
             for name, future in futures.items():
                 try:
@@ -477,6 +488,7 @@ class HybridSearch:
         query: str,
         filters: Optional[Dict[str, Any]],
         trace: Optional[Any],
+        collection: Optional[str],
     ) -> Tuple[List[List[RetrievalResult]], Optional[str]]:
         """Run dense retrieval with error handling.
         
@@ -497,13 +509,19 @@ class HybridSearch:
             provider_name = str(getattr(vector_store, "__class__", type("Unknown", (), {})).__name__).lower()
             if "opensearch" in provider_name:
                 os_filters = dict(filters or {})
-                os_filters.pop("collection", None)
-                ranking_lists = self._run_dense_multichannel_retrieval(query, os_filters, trace)
+                ranking_lists = self._run_dense_multichannel_retrieval(
+                    query,
+                    os_filters,
+                    trace,
+                    collection,
+                )
             else:
+                clean_filters = dict(filters or {})
                 single_results = self.dense_retriever.retrieve(
                     query=query,
                     top_k=self.config.dense_top_k,
-                    filters=filters,
+                    collection=collection,
+                    filters=clean_filters,
                     trace=trace,
                 )
                 ranking_lists = [single_results] if single_results else []
@@ -534,6 +552,7 @@ class HybridSearch:
         query: str,
         filters: Optional[Dict[str, Any]],
         trace: Optional[Any],
+        collection: Optional[str],
     ) -> List[List[RetrievalResult]]:
         vector_fields = [
             "embedding_content",
@@ -553,6 +572,7 @@ class HybridSearch:
                     vector_store.query,
                     vector=query_vector,
                     top_k=self.config.dense_top_k,
+                    collection=collection,
                     filters=filters,
                     trace=trace,
                     vector_field=field,
@@ -577,6 +597,7 @@ class HybridSearch:
         keywords: List[str],
         filters: Optional[Dict[str, Any]],
         trace: Optional[Any],
+        collection: Optional[str],
     ) -> Tuple[Optional[List[RetrievalResult]], Optional[str]]:
         """Run sparse retrieval with error handling.
         
@@ -595,9 +616,6 @@ class HybridSearch:
             return [], None  # No keywords, return empty (not an error)
         
         try:
-            # Extract collection from filters if present
-            collection = filters.get('collection') if filters else None
-            
             _t0 = time.monotonic()
             results = self.sparse_retriever.retrieve(
                 keywords=keywords,

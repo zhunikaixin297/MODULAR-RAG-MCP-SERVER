@@ -78,7 +78,7 @@ class CitationGenerator:
         """
         self.snippet_max_length = snippet_max_length
         self.include_metadata_fields = include_metadata_fields or [
-            "title", "section", "chunk_index", "doc_type"
+            "title", "section", "chunk_index", "doc_type", "source_ref", "doc_hash"
         ]
     
     def generate(self, results: List[RetrievalResult]) -> List[Citation]:

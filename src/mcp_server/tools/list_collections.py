@@ -15,7 +15,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
 
 from mcp import types
 
@@ -216,6 +216,39 @@ class ListCollectionsTool:
             verify_certs=verify_certs,
         )
 
+    def _opensearch_hidden_prefixes(self) -> Tuple[str, ...]:
+        """Prefixes that should never be exposed as MCP collections."""
+        return (
+            ".",
+            "security-auditlog",
+            "top_queries-",
+        )
+
+    def _is_opensearch_vector_collection(self, client: Any, index_name: str, base_index: str) -> bool:
+        """Return True when index looks like a vector-document collection.
+
+        We treat the configured base index as visible by default, then use mappings
+        to validate that other indices are true vector collections.
+        """
+        if index_name == base_index:
+            return True
+
+        try:
+            mappings = client.indices.get_mapping(index=index_name)
+        except Exception as e:
+            logger.debug(f"Failed to get mapping for index '{index_name}': {e}")
+            return False
+
+        # OpenSearch returns a dict keyed by index name.
+        index_mapping = mappings.get(index_name) or next(iter(mappings.values()), {})
+        properties = (
+            index_mapping.get("mappings", {}).get("properties", {})
+            if isinstance(index_mapping, dict)
+            else {}
+        )
+        embedding_content = properties.get("embedding_content", {})
+        return embedding_content.get("type") == "knn_vector"
+
     def _list_opensearch_collections(self, include_stats: bool = True) -> List[CollectionInfo]:
         try:
             client = self._get_opensearch_client()
@@ -226,7 +259,7 @@ class ListCollectionsTool:
         vector_store = getattr(self.settings, "vector_store", None)
         opensearch_config = getattr(vector_store, "opensearch", None)
         base_index = getattr(opensearch_config, "index_name", "base")
-        system_indices_prefixes = (".", "security-auditlog")
+        hidden_prefixes = self._opensearch_hidden_prefixes()
 
         try:
             indices = client.cat.indices(format="json")
@@ -237,7 +270,9 @@ class ListCollectionsTool:
         collections_info: List[CollectionInfo] = []
         for item in indices:
             index_name = item.get("index", "")
-            if not index_name or index_name.startswith(system_indices_prefixes):
+            if not index_name or index_name.startswith(hidden_prefixes):
+                continue
+            if not self._is_opensearch_vector_collection(client, index_name, base_index):
                 continue
             collections_info.append(CollectionInfo(name=index_name))
 
@@ -264,7 +299,12 @@ class ListCollectionsTool:
         Returns:
             List of CollectionInfo objects.
         """
-        provider = getattr(getattr(self.settings, "vector_store", None), "provider", "chroma").lower()
+        # Keep config-only mode deterministic for unit tests and explicit Chroma usage.
+        if self._settings is None and self._config is not None:
+            provider = "chroma"
+        else:
+            provider = getattr(getattr(self.settings, "vector_store", None), "provider", "chroma")
+            provider = str(provider).lower()
         if provider == "opensearch":
             return self._list_opensearch_collections(include_stats=include_stats)
 

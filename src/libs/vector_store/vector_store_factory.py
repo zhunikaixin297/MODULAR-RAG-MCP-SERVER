@@ -86,6 +86,10 @@ class VectorStoreFactory:
                 "Please ensure 'vector_store.provider' is specified in settings.yaml"
             ) from e
         
+        # Collection is now dynamic; ignore collection_name overrides
+        override_kwargs = dict(override_kwargs)
+        override_kwargs.pop("collection_name", None)
+
         # Look up provider class in registry
         provider_class = cls._PROVIDERS.get(provider_name)
         
@@ -174,7 +178,6 @@ class VectorStoreFactory:
         provider = getattr(vector_store, "provider", None)
         base = (
             provider,
-            getattr(vector_store, "collection_name", None),
             getattr(vector_store, "persist_directory", None),
         )
         if str(provider).lower() != "opensearch":

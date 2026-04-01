@@ -101,6 +101,7 @@ class DenseRetriever:
         self,
         query: str,
         top_k: Optional[int] = None,
+        collection: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         trace: Optional[Any] = None,
     ) -> List[RetrievalResult]:
@@ -109,6 +110,7 @@ class DenseRetriever:
         Args:
             query: The search query string. Must not be empty.
             top_k: Maximum number of results to return. If None, uses default_top_k.
+            collection: Optional collection/index name to target.
             filters: Optional metadata filters (e.g., {"collection": "api-docs"}).
             trace: Optional TraceContext for observability (reserved for Stage F).
         
@@ -150,6 +152,7 @@ class DenseRetriever:
             raw_results = self.vector_store.query(
                 vector=query_vector,
                 top_k=effective_top_k,
+                collection=collection,
                 filters=filters,
                 trace=trace,
             )
@@ -170,6 +173,7 @@ class DenseRetriever:
         query: str,
         vector_field: str,
         top_k: Optional[int] = None,
+        collection: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         trace: Optional[Any] = None,
     ) -> List[RetrievalResult]:
@@ -184,6 +188,7 @@ class DenseRetriever:
             raw_results = self.vector_store.query(
                 vector=query_vector,
                 top_k=effective_top_k,
+                collection=collection,
                 filters=filters,
                 trace=trace,
                 vector_field=vector_field,

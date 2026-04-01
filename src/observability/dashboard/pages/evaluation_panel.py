@@ -277,23 +277,19 @@ def _try_create_hybrid_search(settings: Any, collection: str = "base") -> Any:
         from src.libs.embedding.embedding_factory import EmbeddingFactory
         from src.libs.vector_store.vector_store_factory import VectorStoreFactory
 
-        vector_store = VectorStoreFactory.create(
-            settings, collection_name=collection,
-        )
+        vector_store = VectorStoreFactory.create(settings)
         embedding_client = EmbeddingFactory.create(settings)
         dense_retriever = create_dense_retriever(
             settings=settings,
             embedding_client=embedding_client,
             vector_store=vector_store,
         )
-        bm25_indexer = BM25Indexer(index_dir=f"data/db/bm25/{collection}")
+        bm25_indexer = BM25Indexer(index_dir="data/db/bm25")
         sparse_retriever = create_sparse_retriever(
             settings=settings,
             bm25_indexer=bm25_indexer,
             vector_store=vector_store,
         )
-        sparse_retriever.default_collection = collection
-
         query_processor = QueryProcessor()
         return create_hybrid_search(
             settings=settings,

@@ -43,13 +43,7 @@ class DataService:
         """
         from src.core.settings import load_settings, resolve_path
         settings = load_settings()
-        target_collection = collection or getattr(settings.vector_store, "collection_name", "base")
-
-        # Re-create chroma if collection changed
-        if (
-            self._manager is not None
-            and self._current_collection == target_collection
-        ):
+        if self._manager is not None:
             return
 
         from src.ingestion.document_manager import DocumentManager
@@ -60,10 +54,8 @@ class DataService:
 
         self._provider = str(getattr(settings.vector_store, "provider", "chroma")).lower()
 
-        chroma = VectorStoreFactory.create(
-            settings, collection_name=target_collection
-        )
-        bm25 = BM25Indexer(index_dir=str(resolve_path(f"data/db/bm25/{target_collection}")))
+        chroma = VectorStoreFactory.create(settings)
+        bm25 = BM25Indexer(index_dir=str(resolve_path("data/db/bm25")))
         images = ImageStorage(
             db_path=str(resolve_path("data/db/image_index.db")),
             images_root=str(resolve_path("data/images")),
@@ -76,7 +68,7 @@ class DataService:
         self._images = images
         self._integrity = integrity
         self._manager = DocumentManager(chroma, bm25, images, integrity)
-        self._current_collection = target_collection
+        self._current_collection = collection or getattr(settings.vector_store, "collection_name", "base")
 
     # ------------------------------------------------------------------
     # Public API
@@ -150,7 +142,10 @@ class DataService:
         """
         self._ensure_stores(collection)
         try:
-            return self._chroma.get_by_metadata({"doc_hash": source_hash})
+            return self._chroma.get_by_metadata(
+                {"doc_hash": source_hash},
+                collection=collection,
+            )
         except Exception as exc:
             logger.warning("Failed to get chunks for %s: %s", source_hash, exc)
             return []

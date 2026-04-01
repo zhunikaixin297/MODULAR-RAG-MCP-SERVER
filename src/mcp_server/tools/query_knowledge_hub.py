@@ -129,7 +129,6 @@ class QueryKnowledgeHubTool:
         
         # Track initialization state
         self._initialized = False
-        self._current_collection: Optional[str] = None
     
     @property
     def settings(self) -> Settings:
@@ -156,23 +155,8 @@ class QueryKnowledgeHubTool:
         Args:
             collection: Target collection name.
         """
-        if (
-            self._initialized
-            and self._current_collection == collection
-            and self._hybrid_search is not None
-        ):
+        if self._initialized and self._hybrid_search is not None:
             return
-        if self._vector_store is not None:
-            close_fn = getattr(self._vector_store, "close", None)
-            if callable(close_fn):
-                close_result = close_fn()
-                if asyncio.iscoroutine(close_result):
-                    try:
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(close_result)
-                    except RuntimeError:
-                        asyncio.run(close_result)
-            self._vector_store = None
         
         logger.info(f"Initializing query components for collection: {collection}")
         
@@ -193,15 +177,10 @@ class QueryKnowledgeHubTool:
         if self._reranker is None:
             self._reranker = create_core_reranker(settings=self.settings)
         
-        # === Rebuild for new collection ===
-        # ChromaDB PersistentClient uses SQLite under the hood —
-        # concurrent readers see committed writes from other processes
-        # (dashboard ingestion), so caching the client is safe.
-        vector_store = VectorStoreFactory.create(
-            self.settings,
-            collection_name=collection,
-        )
-        self._vector_store = vector_store
+        # === Vector store (single instance with dynamic collections) ===
+        if self._vector_store is None:
+            self._vector_store = VectorStoreFactory.create(self.settings)
+        vector_store = self._vector_store
         
         dense_retriever = create_dense_retriever(
             settings=self.settings,
@@ -213,13 +192,12 @@ class QueryKnowledgeHubTool:
         sparse_enabled = getattr(getattr(self.settings, "retrieval", None), "sparse_enabled", True)
         vector_provider = getattr(getattr(self.settings, "vector_store", None), "provider", "chroma").lower()
         if sparse_enabled and vector_provider == "chroma":
-            bm25_indexer = BM25Indexer(index_dir=str(resolve_path(f"data/db/bm25/{collection}")))
+            bm25_indexer = BM25Indexer(index_dir=str(resolve_path("data/db/bm25")))
             sparse_retriever = create_sparse_retriever(
                 settings=self.settings,
                 bm25_indexer=bm25_indexer,
                 vector_store=vector_store,
             )
-            sparse_retriever.default_collection = collection
         
         query_processor = QueryProcessor()
         self._hybrid_search = create_hybrid_search(
@@ -229,7 +207,6 @@ class QueryKnowledgeHubTool:
             sparse_retriever=sparse_retriever,
         )
         
-        self._current_collection = collection
         self._initialized = True
         logger.info(f"Query components initialized for collection: {collection}")
 
@@ -303,7 +280,7 @@ class QueryKnowledgeHubTool:
             
             # Perform hybrid search (blocking: embedding API + DB queries)
             results = await asyncio.to_thread(
-                self._perform_search, query, effective_top_k, trace,
+                self._perform_search, query, effective_top_k, effective_collection, trace,
             )
             
             # Apply reranking if enabled (may call LLM API)
@@ -349,6 +326,7 @@ class QueryKnowledgeHubTool:
         self,
         query: str,
         top_k: int,
+        collection: str,
         trace: Optional[Any] = None,
     ) -> List[RetrievalResult]:
         """Perform hybrid search.
@@ -371,7 +349,7 @@ class QueryKnowledgeHubTool:
             results = self._hybrid_search.search(
                 query=query,
                 top_k=initial_top_k,
-                filters=None,
+                filters={"collection": collection},
                 trace=trace,
                 return_details=False,
             )

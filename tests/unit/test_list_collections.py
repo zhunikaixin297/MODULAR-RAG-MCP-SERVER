@@ -430,6 +430,85 @@ class TestListCollectionsMethod:
         assert result == []
 
 
+class TestListCollectionsMethodOpenSearch:
+    """Tests for OpenSearch collection filtering behavior."""
+
+    def test_list_opensearch_collections_hides_system_and_non_vector_indices(self) -> None:
+        settings = Mock()
+        settings.vector_store = Mock()
+        settings.vector_store.provider = "opensearch"
+        settings.vector_store.opensearch = Mock()
+        settings.vector_store.opensearch.index_name = "base"
+
+        tool = ListCollectionsTool(settings=settings)
+
+        mock_client = Mock()
+        mock_client.cat.indices.return_value = [
+            {"index": ".kibana_1"},
+            {"index": "top_queries-2026.03.31-25405"},
+            {"index": "base"},
+            {"index": "modular_rag_project"},
+            {"index": "not_vector_index"},
+        ]
+
+        mock_client.indices.get_mapping.side_effect = lambda index: {
+            index: {
+                "mappings": {
+                    "properties": (
+                        {"embedding_content": {"type": "knn_vector"}}
+                        if index == "modular_rag_project"
+                        else {"content": {"type": "text"}}
+                    )
+                }
+            }
+        }
+        mock_client.count.side_effect = lambda index: {
+            "count": {"base": 137, "modular_rag_project": 156}.get(index, 0)
+        }
+
+        with patch.object(tool, "_get_opensearch_client", return_value=mock_client):
+            result = tool.list_collections(include_stats=True)
+
+        names = [c.name for c in result]
+        assert names == ["base", "modular_rag_project"]
+        assert result[0].count == 137
+        assert result[1].count == 156
+
+    def test_list_opensearch_collections_skips_mapping_errors(self) -> None:
+        settings = Mock()
+        settings.vector_store = Mock()
+        settings.vector_store.provider = "opensearch"
+        settings.vector_store.opensearch = Mock()
+        settings.vector_store.opensearch.index_name = "base"
+
+        tool = ListCollectionsTool(settings=settings)
+
+        mock_client = Mock()
+        mock_client.cat.indices.return_value = [
+            {"index": "base"},
+            {"index": "broken_index"},
+        ]
+
+        def mapping_side_effect(index: str):
+            if index == "broken_index":
+                raise RuntimeError("mapping unavailable")
+            return {
+                index: {
+                    "mappings": {
+                        "properties": {"embedding_content": {"type": "knn_vector"}}
+                    }
+                }
+            }
+
+        mock_client.indices.get_mapping.side_effect = mapping_side_effect
+        mock_client.count.return_value = {"count": 1}
+
+        with patch.object(tool, "_get_opensearch_client", return_value=mock_client):
+            result = tool.list_collections(include_stats=True)
+
+        assert [c.name for c in result] == ["base"]
+
+
 # =============================================================================
 # ListCollectionsTool format_response Method Tests
 # =============================================================================
@@ -590,7 +669,7 @@ class TestExecuteMethod:
         with patch.object(tool_with_config, 'list_collections', mock_list):
             await tool_with_config.execute(include_stats=False)
         
-        mock_list.assert_called_once_with(include_stats=False)
+        mock_list.assert_called_once_with(False)
 
 
 # =============================================================================

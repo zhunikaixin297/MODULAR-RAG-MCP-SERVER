@@ -29,6 +29,7 @@ class BaseVectorStore(ABC):
     def upsert(
         self,
         records: List[Dict[str, Any]],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
@@ -39,6 +40,7 @@ class BaseVectorStore(ABC):
                 - 'id': Unique identifier (str)
                 - 'vector': Embedding vector (List[float])
                 - 'metadata': Optional metadata dict (source, chunk_index, etc.)
+            collection: Optional collection/index name to target.
             trace: Optional TraceContext for observability (reserved for Stage F).
             **kwargs: Provider-specific parameters.
         
@@ -68,6 +70,7 @@ class BaseVectorStore(ABC):
         self,
         vector: List[float],
         top_k: int = 10,
+        collection: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
@@ -77,6 +80,7 @@ class BaseVectorStore(ABC):
         Args:
             vector: Query vector (embedding) to search for.
             top_k: Maximum number of results to return.
+            collection: Optional collection/index name to target.
             filters: Optional metadata filters (e.g., {'source': 'doc1.pdf'}).
             trace: Optional TraceContext for observability (reserved for Stage F).
             **kwargs: Provider-specific parameters.
@@ -160,6 +164,7 @@ class BaseVectorStore(ABC):
     def delete(
         self,
         ids: List[str],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
@@ -167,6 +172,7 @@ class BaseVectorStore(ABC):
         
         Args:
             ids: List of record IDs to delete.
+            collection: Optional collection/index name to target.
             trace: Optional TraceContext for observability.
             **kwargs: Provider-specific parameters.
         
@@ -186,14 +192,14 @@ class BaseVectorStore(ABC):
     
     def clear(
         self,
-        collection_name: Optional[str] = None,
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
         """Clear all records from the vector store or a specific collection.
         
         Args:
-            collection_name: Optional collection name to clear. If None, clears default collection.
+            collection: Optional collection name to clear. If None, clears default collection.
             trace: Optional TraceContext for observability.
             **kwargs: Provider-specific parameters.
         
@@ -212,6 +218,7 @@ class BaseVectorStore(ABC):
     def get_by_ids(
         self,
         ids: List[str],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
@@ -222,6 +229,7 @@ class BaseVectorStore(ABC):
         
         Args:
             ids: List of record IDs to retrieve.
+            collection: Optional collection/index name to target.
             trace: Optional TraceContext for observability (reserved for Stage F).
             **kwargs: Provider-specific parameters.
         
@@ -258,6 +266,7 @@ class BaseVectorStore(ABC):
         self,
         query_text: str,
         top_k: int = 10,
+        collection: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
@@ -270,6 +279,7 @@ class BaseVectorStore(ABC):
     def delete_by_metadata(
         self,
         filters: Dict[str, Any],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> int:
@@ -277,6 +287,7 @@ class BaseVectorStore(ABC):
         
         Args:
             filters: Metadata key/value pairs to match.
+            collection: Optional collection/index name to target.
             trace: Optional TraceContext for observability.
             **kwargs: Provider-specific parameters.
         
@@ -295,6 +306,7 @@ class BaseVectorStore(ABC):
     def get_ids_by_metadata(
         self,
         filters: Dict[str, Any],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> List[str]:
@@ -302,6 +314,7 @@ class BaseVectorStore(ABC):
         
         Args:
             filters: Metadata key/value pairs to match.
+            collection: Optional collection/index name to target.
             trace: Optional TraceContext for observability.
             **kwargs: Provider-specific parameters.
         
@@ -320,6 +333,7 @@ class BaseVectorStore(ABC):
     def count_by_metadata(
         self,
         filters: Dict[str, Any],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> int:
@@ -327,6 +341,7 @@ class BaseVectorStore(ABC):
         
         Args:
             filters: Metadata key/value pairs to match.
+            collection: Optional collection/index name to target.
             trace: Optional TraceContext for observability.
             **kwargs: Provider-specific parameters.
         
@@ -345,6 +360,7 @@ class BaseVectorStore(ABC):
     def get_by_metadata(
         self,
         filters: Dict[str, Any],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
@@ -352,6 +368,7 @@ class BaseVectorStore(ABC):
         
         Args:
             filters: Metadata key/value pairs to match.
+            collection: Optional collection/index name to target.
             trace: Optional TraceContext for observability.
             **kwargs: Provider-specific parameters.
         

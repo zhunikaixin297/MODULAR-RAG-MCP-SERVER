@@ -30,12 +30,15 @@ def test_docling_semantic_flow():
 def test_opensearch_factory_init():
     """Verify OpenSearchStore can be initialized from factory."""
     from src.libs.vector_store.vector_store_factory import VectorStoreFactory
+    from src.libs.vector_store.opensearch_store import OpenSearchStore
     settings = load_settings("config/settings.yaml")
+
+    # test_vector_store_contract may mutate provider registry; ensure required provider exists.
+    VectorStoreFactory.register_provider("opensearch", OpenSearchStore)
     
     # Mock settings to use opensearch if not default
     store = VectorStoreFactory.create(settings, collection_name="test_factory_init")
     assert store is not None
-    from src.libs.vector_store.opensearch_store import OpenSearchStore
     assert isinstance(store, OpenSearchStore)
     
     # Test close

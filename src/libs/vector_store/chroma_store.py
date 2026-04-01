@@ -86,8 +86,8 @@ class ChromaStore(BaseVectorStore):
                 "Please ensure 'vector_store' section exists in settings.yaml"
             ) from e
         
-        # Collection name (allow override)
-        self.collection_name = kwargs.get(
+        # Default collection name (allow override for defaults only)
+        self.default_collection = kwargs.get(
             'collection_name',
             getattr(vector_store_config, 'collection_name', 'base')
         )
@@ -103,8 +103,9 @@ class ChromaStore(BaseVectorStore):
         self.persist_directory.mkdir(parents=True, exist_ok=True)
         
         logger.info(
-            f"Initializing ChromaStore: collection='{self.collection_name}', "
-            f"persist_directory='{self.persist_directory}'"
+            "Initializing ChromaStore: default_collection='%s', persist_directory='%s'",
+            self.default_collection,
+            self.persist_directory,
         )
         
         # Initialize ChromaDB client with persistent storage
@@ -121,25 +122,16 @@ class ChromaStore(BaseVectorStore):
                 f"Failed to initialize ChromaDB client at '{self.persist_directory}': {e}"
             ) from e
         
-        # Get or create collection
-        try:
-            self.collection = self.client.get_or_create_collection(
-                name=self.collection_name,
-                metadata={"hnsw:space": "cosine"}  # Use cosine similarity
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to get or create collection '{self.collection_name}': {e}"
-            ) from e
-        
-        logger.info(
-            f"ChromaStore initialized successfully. "
-            f"Collection count: {self.collection.count()}"
-        )
+        # Initialize collection cache (lazy per-collection)
+        self._collections: Dict[str, Any] = {}
+
+        # Prime the default collection to fail fast if misconfigured
+        _ = self._get_collection(self.default_collection)
     
     def upsert(
         self,
         records: List[Dict[str, Any]],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
@@ -188,7 +180,8 @@ class ChromaStore(BaseVectorStore):
         
         # Perform upsert (ChromaDB's add() is idempotent with same IDs)
         try:
-            self.collection.upsert(
+            target_collection = self._get_collection(collection)
+            target_collection.upsert(
                 ids=ids,
                 embeddings=embeddings,
                 metadatas=metadatas,
@@ -204,6 +197,7 @@ class ChromaStore(BaseVectorStore):
         self,
         vector: List[float],
         top_k: int = 10,
+        collection: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
@@ -236,7 +230,8 @@ class ChromaStore(BaseVectorStore):
         
         # Perform query
         try:
-            results = self.collection.query(
+            target_collection = self._get_collection(collection)
+            results = target_collection.query(
                 query_embeddings=[vector],
                 n_results=top_k,
                 where=where_clause,
@@ -277,6 +272,7 @@ class ChromaStore(BaseVectorStore):
     def delete(
         self,
         ids: List[str],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
@@ -295,7 +291,8 @@ class ChromaStore(BaseVectorStore):
             raise ValueError("IDs list cannot be empty")
         
         try:
-            self.collection.delete(ids=[str(id_) for id_ in ids])
+            target_collection = self._get_collection(collection)
+            target_collection.delete(ids=[str(id_) for id_ in ids])
             logger.debug(f"Successfully deleted {len(ids)} records from ChromaDB")
         except Exception as e:
             raise RuntimeError(
@@ -304,7 +301,7 @@ class ChromaStore(BaseVectorStore):
     
     def clear(
         self,
-        collection_name: Optional[str] = None,
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
@@ -319,23 +316,22 @@ class ChromaStore(BaseVectorStore):
             RuntimeError: If the clear operation fails.
         """
         try:
-            target_collection = collection_name or self.collection_name
-            
+            target_collection = collection or self.default_collection
+
             # Delete and recreate collection (most efficient way to clear in Chroma)
             self.client.delete_collection(name=target_collection)
-            self.collection = self.client.get_or_create_collection(
-                name=target_collection,
-                metadata={"hnsw:space": "cosine"}
-            )
+            self._collections.pop(target_collection, None)
+            self._get_collection(target_collection)
             logger.info(f"Successfully cleared collection '{target_collection}'")
         except Exception as e:
             raise RuntimeError(
-                f"Failed to clear collection '{collection_name or self.collection_name}': {e}"
+                f"Failed to clear collection '{collection or self.default_collection}': {e}"
             ) from e
 
     def delete_by_metadata(
         self,
         filters: Dict[str, Any],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> int:
@@ -360,14 +356,15 @@ class ChromaStore(BaseVectorStore):
         try:
             where = self._build_where_clause(filters)
             # Query matching IDs first
-            results = self.collection.get(where=where, include=[])
+            target_collection = self._get_collection(collection)
+            results = target_collection.get(where=where, include=[])
             matching_ids = results.get("ids", [])
 
             if not matching_ids:
                 logger.debug(f"delete_by_metadata: no records matched {filters}")
                 return 0
 
-            self.collection.delete(ids=matching_ids)
+            target_collection.delete(ids=matching_ids)
             logger.info(
                 f"delete_by_metadata: deleted {len(matching_ids)} records "
                 f"matching {filters}"
@@ -381,6 +378,7 @@ class ChromaStore(BaseVectorStore):
     def get_ids_by_metadata(
         self,
         filters: Dict[str, Any],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> List[str]:
@@ -390,7 +388,8 @@ class ChromaStore(BaseVectorStore):
 
         try:
             where = self._build_where_clause(filters)
-            results = self.collection.get(where=where, include=[])
+            target_collection = self._get_collection(collection)
+            results = target_collection.get(where=where, include=[])
             return results.get("ids", [])
         except Exception as e:
             raise RuntimeError(
@@ -400,6 +399,7 @@ class ChromaStore(BaseVectorStore):
     def count_by_metadata(
         self,
         filters: Dict[str, Any],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> int:
@@ -409,7 +409,8 @@ class ChromaStore(BaseVectorStore):
 
         try:
             where = self._build_where_clause(filters)
-            results = self.collection.get(where=where, include=[])
+            target_collection = self._get_collection(collection)
+            results = target_collection.get(where=where, include=[])
             return len(results.get("ids", []))
         except Exception as e:
             raise RuntimeError(
@@ -419,6 +420,7 @@ class ChromaStore(BaseVectorStore):
     def get_by_metadata(
         self,
         filters: Dict[str, Any],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
@@ -428,7 +430,8 @@ class ChromaStore(BaseVectorStore):
 
         try:
             where = self._build_where_clause(filters)
-            results = self.collection.get(
+            target_collection = self._get_collection(collection)
+            results = target_collection.get(
                 where=where, include=["documents", "metadatas"]
             )
             
@@ -506,7 +509,7 @@ class ChromaStore(BaseVectorStore):
         
         return where
     
-    def get_collection_stats(self) -> Dict[str, Any]:
+    def get_collection_stats(self, collection: Optional[str] = None) -> Dict[str, Any]:
         """Get statistics about the current collection.
         
         Returns:
@@ -515,16 +518,18 @@ class ChromaStore(BaseVectorStore):
                 - name: Collection name
                 - metadata: Collection metadata
         """
+        target_collection = self._get_collection(collection)
         return {
-            'count': self.collection.count(),
-            'name': self.collection_name,
-            'metadata': self.collection.metadata
+            'count': target_collection.count(),
+            'name': target_collection.name,
+            'metadata': target_collection.metadata
         }
 
     def keyword_search(
         self,
         query_text: str,
         top_k: int = 10,
+        collection: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
@@ -534,6 +539,7 @@ class ChromaStore(BaseVectorStore):
     def get_by_ids(
         self,
         ids: List[str],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
@@ -567,7 +573,8 @@ class ChromaStore(BaseVectorStore):
         
         try:
             # ChromaDB's get method retrieves records by IDs
-            results = self.collection.get(
+            target_collection = self._get_collection(collection)
+            results = target_collection.get(
                 ids=str_ids,
                 include=["metadatas", "documents"]
             )
@@ -602,3 +609,19 @@ class ChromaStore(BaseVectorStore):
         
         logger.debug(f"Retrieved {len([r for r in output if r])} of {len(ids)} records by IDs")
         return output
+
+    def _get_collection(self, collection: Optional[str]) -> Any:
+        target = collection or self.default_collection
+        if target in self._collections:
+            return self._collections[target]
+        try:
+            coll = self.client.get_or_create_collection(
+                name=target,
+                metadata={"hnsw:space": "cosine"}
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to get or create collection '{target}': {e}"
+            ) from e
+        self._collections[target] = coll
+        return coll

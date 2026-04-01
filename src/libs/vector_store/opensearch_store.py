@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from threading import Thread
+from threading import Thread, RLock
 from typing import Any, Dict, List, Optional
 import jieba
 
@@ -41,7 +41,7 @@ class OpenSearchStore(BaseVectorStore):
         collection_name = kwargs.get("collection_name") or getattr(
             getattr(settings, "vector_store", None), "collection_name", None
         )
-        self.index_name = collection_name or base_index_name
+        self.default_collection = collection_name or base_index_name
         self.timeout_seconds = getattr(opensearch_config, "timeout_seconds", 60)
         self.max_retries = getattr(opensearch_config, "max_retries", 3)
         self.max_concurrency = getattr(opensearch_config, "max_concurrency", 10)
@@ -61,15 +61,17 @@ class OpenSearchStore(BaseVectorStore):
         self.verify_certs = getattr(opensearch_config, "verify_certs", False)
         self.hosts = hosts
         self._client: Optional[AsyncOpenSearch] = None
-        self._bg_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
-        self._loop_thread = Thread(target=self._run_loop, name="OpenSearchStoreLoop", daemon=True)
-        self._loop_thread.start()
+        self._bg_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[Thread] = None
+        self._ensured_indices: set[str] = set()
+        self._index_lock = RLock()
+        self._ensure_loop_running()
 
         self.dimension = getattr(settings.embedding, "dimensions", None)
         if not self.dimension:
             raise ValueError("Missing embedding dimensions in settings.embedding.dimensions")
 
-        self._run_async(self._ensure_index())
+        self._ensure_index_sync(self.default_collection)
 
     @property
     def client(self) -> AsyncOpenSearch:
@@ -91,23 +93,44 @@ class OpenSearchStore(BaseVectorStore):
         self._shutdown()
 
     def _run_loop(self) -> None:
+        if self._bg_loop is None:
+            return
         asyncio.set_event_loop(self._bg_loop)
         self._bg_loop.run_forever()
 
+    def _ensure_loop_running(self) -> None:
+        """Ensure the background event loop exists and is running."""
+        if self._bg_loop is not None and not self._bg_loop.is_closed():
+            if self._loop_thread is not None and self._loop_thread.is_alive():
+                return
+        # Create a new loop/thread when the previous one was closed or not started.
+        self._bg_loop = asyncio.new_event_loop()
+        self._loop_thread = Thread(
+            target=self._run_loop,
+            name="OpenSearchStoreLoop",
+            daemon=True,
+        )
+        self._loop_thread.start()
+        # Drop client so it is recreated on the new loop.
+        self._client = None
+
     def _shutdown(self) -> None:
-        if self._client is not None:
+        if self._client is not None and self._bg_loop is not None:
             close_future = asyncio.run_coroutine_threadsafe(self._client.close(), self._bg_loop)
             try:
                 close_future.result(timeout=10)
             except Exception:
                 pass
             self._client = None
-        if self._bg_loop.is_running():
-            self._bg_loop.call_soon_threadsafe(self._bg_loop.stop)
-        if self._loop_thread.is_alive():
-            self._loop_thread.join(timeout=5)
-        if not self._bg_loop.is_closed():
-            self._bg_loop.close()
+        if self._bg_loop is not None:
+            if self._bg_loop.is_running():
+                self._bg_loop.call_soon_threadsafe(self._bg_loop.stop)
+            if self._loop_thread is not None and self._loop_thread.is_alive():
+                self._loop_thread.join(timeout=5)
+            if not self._bg_loop.is_closed():
+                self._bg_loop.close()
+        self._bg_loop = None
+        self._loop_thread = None
 
     def __del__(self) -> None:
         self._shutdown()
@@ -115,16 +138,20 @@ class OpenSearchStore(BaseVectorStore):
     def upsert(
         self,
         records: List[Dict[str, Any]],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
         self.validate_records(records)
-        self._run_async(self._async_upsert(records))
+        target_index = self._resolve_collection(collection)
+        self._ensure_index_sync(target_index)
+        self._run_async(self._async_upsert(records, target_index))
 
     def query(
         self,
         vector: List[float],
         top_k: int = 10,
+        collection: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
@@ -137,12 +164,15 @@ class OpenSearchStore(BaseVectorStore):
             "hypothetical_questions": "embedding_hypothetical_questions",
         }
         vector_field = field_mapping.get(requested_field, requested_field)
-        return self._run_async(self._async_query(vector, top_k, filters, vector_field))
+        target_index = self._resolve_collection(collection)
+        self._ensure_index_sync(target_index)
+        return self._run_async(self._async_query(vector, top_k, filters, vector_field, target_index))
 
     def keyword_search(
         self,
         query_text: str,
         top_k: int = 10,
+        collection: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
@@ -152,80 +182,100 @@ class OpenSearchStore(BaseVectorStore):
         if top_k <= 0:
             raise ValueError("top_k must be positive")
         tokenized = " ".join(jieba.cut_for_search(query_text))
-        return self._run_async(self._async_keyword_search(tokenized, top_k, filters))
+        target_index = self._resolve_collection(collection)
+        self._ensure_index_sync(target_index)
+        return self._run_async(self._async_keyword_search(tokenized, top_k, filters, target_index))
 
     def delete(
         self,
         ids: List[str],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
         if not ids:
             raise ValueError("IDs list cannot be empty")
-        self._run_async(self._async_delete(ids))
+        target_index = self._resolve_collection(collection)
+        self._ensure_index_sync(target_index)
+        self._run_async(self._async_delete(ids, target_index))
 
     def clear(
         self,
-        collection_name: Optional[str] = None,
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
-        target_index = collection_name or self.index_name
+        target_index = self._resolve_collection(collection)
         self._run_async(self._async_clear(target_index))
 
     def get_by_ids(
         self,
         ids: List[str],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
         if not ids:
             raise ValueError("IDs list cannot be empty")
-        return self._run_async(self._async_get_by_ids(ids))
+        target_index = self._resolve_collection(collection)
+        self._ensure_index_sync(target_index)
+        return self._run_async(self._async_get_by_ids(ids, target_index))
 
     def delete_by_metadata(
         self,
         filters: Dict[str, Any],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> int:
         if not filters:
             raise ValueError("filters cannot be empty")
-        return self._run_async(self._async_delete_by_metadata(filters))
+        target_index = self._resolve_collection(collection)
+        self._ensure_index_sync(target_index)
+        return self._run_async(self._async_delete_by_metadata(filters, target_index))
 
     def get_ids_by_metadata(
         self,
         filters: Dict[str, Any],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> List[str]:
         if not filters:
             raise ValueError("filters cannot be empty")
-        return self._run_async(self._async_get_ids_by_metadata(filters))
+        target_index = self._resolve_collection(collection)
+        self._ensure_index_sync(target_index)
+        return self._run_async(self._async_get_ids_by_metadata(filters, target_index))
 
     def count_by_metadata(
         self,
         filters: Dict[str, Any],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> int:
         if not filters:
             raise ValueError("filters cannot be empty")
-        return self._run_async(self._async_count_by_metadata(filters))
+        target_index = self._resolve_collection(collection)
+        self._ensure_index_sync(target_index)
+        return self._run_async(self._async_count_by_metadata(filters, target_index))
 
     def get_by_metadata(
         self,
         filters: Dict[str, Any],
+        collection: Optional[str] = None,
         trace: Optional[Any] = None,
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
         if not filters:
             raise ValueError("filters cannot be empty")
-        return self._run_async(self._async_get_by_metadata(filters))
+        target_index = self._resolve_collection(collection)
+        self._ensure_index_sync(target_index)
+        return self._run_async(self._async_get_by_metadata(filters, target_index))
 
-    async def _ensure_index(self) -> None:
+    async def _ensure_index(self, index_name: str) -> None:
         try:
-            exists = await self.client.indices.exists(index=self.index_name)
+            exists = await self.client.indices.exists(index=index_name)
         except Exception as e:
             logger.error(f"OpenSearch index existence check failed: {e}", exc_info=True)
             raise
@@ -265,12 +315,12 @@ class OpenSearchStore(BaseVectorStore):
         }
 
         try:
-            await self.client.indices.create(index=self.index_name, body=body)
+            await self.client.indices.create(index=index_name, body=body)
         except Exception as e:
             logger.error(f"OpenSearch index creation failed: {e}", exc_info=True)
             raise
 
-    async def _async_upsert(self, records: List[Dict[str, Any]]) -> None:
+    async def _async_upsert(self, records: List[Dict[str, Any]], index_name: str) -> None:
         actions = []
         for record in records:
             metadata = record.get("metadata", {})
@@ -281,7 +331,7 @@ class OpenSearchStore(BaseVectorStore):
             actions.append(
                 {
                     "_op_type": "index",
-                    "_index": self.index_name,
+                    "_index": index_name,
                     "_id": str(record["id"]),
                     "_source": {
                         "chunk_id": str(record["id"]),
@@ -327,6 +377,7 @@ class OpenSearchStore(BaseVectorStore):
         top_k: int,
         filters: Optional[Dict[str, Any]],
         vector_field: str,
+        index_name: str,
     ) -> List[Dict[str, Any]]:
         filter_clause = None
         if filters:
@@ -356,7 +407,7 @@ class OpenSearchStore(BaseVectorStore):
         }
 
         try:
-            response = await self.client.search(index=self.index_name, body=query)
+            response = await self.client.search(index=index_name, body=query)
         except Exception as e:
             logger.error(f"OpenSearch query failed: {e}", exc_info=True)
             raise RuntimeError(f"OpenSearch query failed: {e}") from e
@@ -380,6 +431,7 @@ class OpenSearchStore(BaseVectorStore):
         tokenized_query: str,
         top_k: int,
         filters: Optional[Dict[str, Any]],
+        index_name: str,
     ) -> List[Dict[str, Any]]:
         must_clauses: List[Dict[str, Any]] = [
             {
@@ -408,7 +460,7 @@ class OpenSearchStore(BaseVectorStore):
             },
         }
         try:
-            response = await self.client.search(index=self.index_name, body=query)
+            response = await self.client.search(index=index_name, body=query)
         except Exception as e:
             logger.error(f"OpenSearch keyword search failed: {e}", exc_info=True)
             raise RuntimeError(f"OpenSearch keyword search failed: {e}") from e
@@ -427,9 +479,9 @@ class OpenSearchStore(BaseVectorStore):
             )
         return results
 
-    async def _async_delete(self, ids: List[str]) -> None:
+    async def _async_delete(self, ids: List[str], index_name: str) -> None:
         actions = [
-            {"_op_type": "delete", "_index": self.index_name, "_id": str(id_)}
+            {"_op_type": "delete", "_index": index_name, "_id": str(id_)}
             for id_ in ids
         ]
         try:
@@ -471,10 +523,10 @@ class OpenSearchStore(BaseVectorStore):
             logger.error(f"OpenSearch clear failed: {e}", exc_info=True)
             raise RuntimeError(f"OpenSearch clear failed: {e}") from e
 
-    async def _async_get_by_ids(self, ids: List[str]) -> List[Dict[str, Any]]:
+    async def _async_get_by_ids(self, ids: List[str], index_name: str) -> List[Dict[str, Any]]:
         try:
             response = await self.client.mget(
-                index=self.index_name,
+                index=index_name,
                 body={"ids": [str(id_) for id_ in ids]},
             )
         except Exception as e:
@@ -502,7 +554,7 @@ class OpenSearchStore(BaseVectorStore):
                 )
         return output
 
-    async def _async_delete_by_metadata(self, filter_dict: Dict[str, Any]) -> int:
+    async def _async_delete_by_metadata(self, filter_dict: Dict[str, Any], index_name: str) -> int:
         must_terms = []
         for key, value in filter_dict.items():
             field = f"metadata.{key}"
@@ -510,7 +562,7 @@ class OpenSearchStore(BaseVectorStore):
         query = {"query": {"bool": {"must": must_terms}}}
         try:
             response = await self.client.delete_by_query(
-                index=self.index_name,
+                index=index_name,
                 body=query,
                 refresh="wait_for" if self.refresh else False,
             )
@@ -519,7 +571,7 @@ class OpenSearchStore(BaseVectorStore):
             logger.error(f"OpenSearch delete_by_metadata failed: {e}", exc_info=True)
             raise RuntimeError(f"OpenSearch delete_by_metadata failed: {e}") from e
 
-    async def _async_get_ids_by_metadata(self, filter_dict: Dict[str, Any]) -> List[str]:
+    async def _async_get_ids_by_metadata(self, filter_dict: Dict[str, Any], index_name: str) -> List[str]:
         must_terms = []
         for key, value in filter_dict.items():
             field = f"metadata.{key}"
@@ -530,27 +582,27 @@ class OpenSearchStore(BaseVectorStore):
             "size": 10000,  # Max result size for this operation
         }
         try:
-            response = await self.client.search(index=self.index_name, body=query)
+            response = await self.client.search(index=index_name, body=query)
             hits = response.get("hits", {}).get("hits", [])
             return [hit["_id"] for hit in hits]
         except Exception as e:
             logger.error(f"OpenSearch get_ids_by_metadata failed: {e}", exc_info=True)
             raise RuntimeError(f"OpenSearch get_ids_by_metadata failed: {e}") from e
 
-    async def _async_count_by_metadata(self, filter_dict: Dict[str, Any]) -> int:
+    async def _async_count_by_metadata(self, filter_dict: Dict[str, Any], index_name: str) -> int:
         must_terms = []
         for key, value in filter_dict.items():
             field = f"metadata.{key}"
             must_terms.append({"term": {field: value}})
         query = {"query": {"bool": {"must": must_terms}}}
         try:
-            response = await self.client.count(index=self.index_name, body=query)
+            response = await self.client.count(index=index_name, body=query)
             return int(response.get("count", 0))
         except Exception as e:
             logger.error(f"OpenSearch count_by_metadata failed: {e}", exc_info=True)
             raise RuntimeError(f"OpenSearch count_by_metadata failed: {e}") from e
 
-    async def _async_get_by_metadata(self, filter_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
+    async def _async_get_by_metadata(self, filter_dict: Dict[str, Any], index_name: str) -> List[Dict[str, Any]]:
         must_terms = []
         for key, value in filter_dict.items():
             field = f"metadata.{key}"
@@ -561,7 +613,7 @@ class OpenSearchStore(BaseVectorStore):
             "sort": [{"metadata.chunk_index": {"order": "asc"}}],
         }
         try:
-            response = await self.client.search(index=self.index_name, body=query)
+            response = await self.client.search(index=index_name, body=query)
             hits = response.get("hits", {}).get("hits", [])
             results = []
             for hit in hits:
@@ -577,7 +629,18 @@ class OpenSearchStore(BaseVectorStore):
             raise RuntimeError(f"OpenSearch get_by_metadata failed: {e}") from e
 
     def _run_async(self, coro: Any) -> Any:
-        if self._bg_loop.is_closed():
+        self._ensure_loop_running()
+        if self._bg_loop is None or self._bg_loop.is_closed():
             raise RuntimeError("OpenSearch background event loop is closed")
         future = asyncio.run_coroutine_threadsafe(coro, self._bg_loop)
         return future.result()
+
+    def _resolve_collection(self, collection: Optional[str]) -> str:
+        return collection or self.default_collection
+
+    def _ensure_index_sync(self, index_name: str) -> None:
+        with self._index_lock:
+            if index_name in self._ensured_indices:
+                return
+            self._run_async(self._ensure_index(index_name))
+            self._ensured_indices.add(index_name)

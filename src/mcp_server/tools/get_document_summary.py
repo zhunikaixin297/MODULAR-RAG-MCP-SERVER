@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from mcp import types
+from src.libs.vector_store.vector_store_factory import VectorStoreFactory
 
 if TYPE_CHECKING:
     from src.mcp_server.protocol_handler import ProtocolHandler
@@ -46,7 +47,7 @@ TOOL_INPUT_SCHEMA: Dict[str, Any] = {
     "properties": {
         "doc_id": {
             "type": "string",
-            "description": "The document ID to retrieve summary for. Can be full doc_id (e.g., 'doc_abc123') or the hash portion.",
+            "description": "Document ID for summary lookup. Must be source_ref (e.g., 'doc_xxx') or doc_hash (64-hex). Do not pass source_path.",
         },
         "collection": {
             "type": "string",
@@ -101,7 +102,7 @@ class GetDocumentSummaryConfig:
         summary_max_length: Maximum characters for summary preview
     """
     persist_directory: str = "./data/db/chroma"
-    default_collection: str = "base"
+    default_collection: str = "knowledge_hub"
     summary_max_length: int = 500
 
 
@@ -149,6 +150,7 @@ class GetDocumentSummaryTool:
         self._settings = settings
         self._config = config
         self._chroma_client = None
+        self._vector_store = None
         
     @property
     def settings(self) -> Settings:
@@ -171,11 +173,11 @@ class GetDocumentSummaryTool:
                 default_collection = getattr(
                     self.settings.vector_store,
                     'collection_name',
-                    'base'
+                    'knowledge_hub'
                 )
             except AttributeError:
                 persist_dir = './data/db/chroma'
-                default_collection = 'base'
+                default_collection = 'knowledge_hub'
             
             self._config = GetDocumentSummaryConfig(
                 persist_directory=persist_dir,
@@ -248,6 +250,49 @@ class GetDocumentSummaryTool:
             raise ValueError(
                 f"Collection '{name}' does not exist: {e}"
             ) from e
+
+    def _get_vector_store(self) -> Any:
+        """Get or create vector store instance from configured provider."""
+        if self._vector_store is None:
+            self._vector_store = VectorStoreFactory.create(self.settings)
+        return self._vector_store
+
+    def _find_document_chunks_opensearch(
+        self,
+        doc_id: str,
+        collection_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Find document chunks via vector store metadata queries (OpenSearch-compatible)."""
+        vector_store = self._get_vector_store()
+        target_collection = collection_name or self.config.default_collection
+
+        # Try exact matches by most common document-level keys first.
+        candidates: List[Dict[str, Any]] = [
+            {"source_ref": doc_id},
+            {"doc_hash": doc_id},
+        ]
+
+        chunks: List[Dict[str, Any]] = []
+        for filt in candidates:
+            try:
+                rows = vector_store.get_by_metadata(filt, collection=target_collection)
+            except Exception as e:
+                logger.debug(f"OpenSearch metadata lookup failed for {filt}: {e}")
+                continue
+            if rows:
+                chunks = rows
+                break
+
+        normalized_chunks: List[Dict[str, Any]] = []
+        for row in chunks:
+            normalized_chunks.append(
+                {
+                    "id": row.get("id", ""),
+                    "text": row.get("text", ""),
+                    "metadata": row.get("metadata", {}) or {},
+                }
+            )
+        return normalized_chunks
     
     def _find_document_chunks(
         self,
@@ -266,6 +311,15 @@ class GetDocumentSummaryTool:
         Returns:
             List of chunk data with metadata.
         """
+        # Keep config-only mode deterministic for unit tests and explicit Chroma usage.
+        if self._settings is None and self._config is not None:
+            provider = "chroma"
+        else:
+            provider = getattr(getattr(self.settings, "vector_store", None), "provider", "chroma")
+            provider = str(provider).lower()
+        if provider == "opensearch":
+            return self._find_document_chunks_opensearch(doc_id, collection_name)
+
         collection = self._get_collection(collection_name)
         
         # Strategy 1: Search by source_ref metadata
