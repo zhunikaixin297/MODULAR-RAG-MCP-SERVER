@@ -224,7 +224,12 @@ class ListCollectionsTool:
             "top_queries-",
         )
 
-    def _is_opensearch_vector_collection(self, client: Any, index_name: str, base_index: str) -> bool:
+    def _is_opensearch_vector_collection(
+        self,
+        mappings: Dict[str, Any],
+        index_name: str,
+        base_index: str,
+    ) -> bool:
         """Return True when index looks like a vector-document collection.
 
         We treat the configured base index as visible by default, then use mappings
@@ -233,13 +238,6 @@ class ListCollectionsTool:
         if index_name == base_index:
             return True
 
-        try:
-            mappings = client.indices.get_mapping(index=index_name)
-        except Exception as e:
-            logger.debug(f"Failed to get mapping for index '{index_name}': {e}")
-            return False
-
-        # OpenSearch returns a dict keyed by index name.
         index_mapping = mappings.get(index_name) or next(iter(mappings.values()), {})
         properties = (
             index_mapping.get("mappings", {}).get("properties", {})
@@ -266,18 +264,40 @@ class ListCollectionsTool:
         except Exception as e:
             logger.error(f"Failed to list OpenSearch indices: {e}")
             return []
+        try:
+            mappings = client.indices.get_mapping(index="*")
+        except Exception as e:
+            logger.error(f"Failed to load OpenSearch mappings in batch: {e}")
+            mappings = {}
 
         collections_info: List[CollectionInfo] = []
         for item in indices:
             index_name = item.get("index", "")
             if not index_name or index_name.startswith(hidden_prefixes):
                 continue
-            if not self._is_opensearch_vector_collection(client, index_name, base_index):
+            index_mappings = mappings
+            if index_name != base_index and index_name not in mappings:
+                try:
+                    index_mappings = client.indices.get_mapping(index=index_name)
+                except Exception as e:
+                    logger.warning(f"Skipping index '{index_name}' because mapping lookup failed: {e}")
+                    continue
+            if not self._is_opensearch_vector_collection(index_mappings, index_name, base_index):
                 continue
-            collections_info.append(CollectionInfo(name=index_name))
+            count_value: Optional[int] = None
+            if include_stats:
+                raw_count = item.get("docs.count")
+                if raw_count is not None and raw_count not in ("", "-", "null"):
+                    try:
+                        count_value = int(raw_count)
+                    except Exception:
+                        count_value = None
+            collections_info.append(CollectionInfo(name=index_name, count=count_value))
 
         if include_stats and collections_info:
             for info in collections_info:
+                if info.count is not None:
+                    continue
                 index_name = info.name
                 try:
                     count = client.count(index=index_name).get("count")
