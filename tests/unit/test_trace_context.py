@@ -230,3 +230,30 @@ class TestTraceCollector:
         collector = TraceCollector(traces_path=p)
         assert collector.path == p
         assert p.parent.exists()
+
+    def test_respects_trace_enabled_false(self, tmp_path, monkeypatch) -> None:
+        p = tmp_path / "traces.jsonl"
+        fake_settings = type(
+            "S",
+            (),
+            {"observability": type("O", (), {"trace_enabled": False, "trace_file": None})()},
+        )()
+        monkeypatch.setattr("src.core.trace.trace_collector.load_settings", lambda: fake_settings)
+        collector = TraceCollector(traces_path=p)
+        tc = TraceContext()
+        collector.collect(tc)
+        assert collector.enabled is False
+        assert not p.exists()
+
+    def test_uses_configured_trace_file_for_default_path(self, tmp_path, monkeypatch) -> None:
+        configured = "./logs/custom-traces.jsonl"
+        expected_path = tmp_path / "custom-traces.jsonl"
+        fake_settings = type(
+            "S",
+            (),
+            {"observability": type("O", (), {"trace_enabled": True, "trace_file": configured})()},
+        )()
+        monkeypatch.setattr("src.core.trace.trace_collector.load_settings", lambda: fake_settings)
+        monkeypatch.setattr("src.core.trace.trace_collector.resolve_path", lambda _path: expected_path)
+        collector = TraceCollector()
+        assert collector.path == expected_path

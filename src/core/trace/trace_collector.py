@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from src.core.settings import resolve_path
+from src.core.settings import load_settings, resolve_path
 from src.core.trace.trace_context import TraceContext
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,24 @@ class TraceCollector:
     """
 
     def __init__(self, traces_path: str | Path = _DEFAULT_TRACES_PATH) -> None:
-        self._path = Path(traces_path)
+        self._enabled = True
+        resolved_path: Path = Path(traces_path)
+
+        # Honor settings.observability.trace_enabled / trace_file when available.
+        try:
+            settings = load_settings()
+            observability = getattr(settings, "observability", None)
+            if observability is not None:
+                self._enabled = bool(getattr(observability, "trace_enabled", True))
+                if traces_path == _DEFAULT_TRACES_PATH:
+                    configured_path = getattr(observability, "trace_file", None)
+                    if configured_path:
+                        resolved_path = resolve_path(configured_path)
+        except Exception:
+            # Keep collector non-fatal: use defaults if settings cannot be loaded.
+            self._enabled = True
+
+        self._path = Path(resolved_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
     def collect(self, trace: TraceContext) -> None:
@@ -41,6 +58,9 @@ class TraceCollector:
         Args:
             trace: A populated :class:`TraceContext`.
         """
+        if not self._enabled:
+            return
+
         if trace.finished_at is None:
             trace.finish()
 
@@ -55,3 +75,8 @@ class TraceCollector:
     def path(self) -> Path:
         """Return the resolved path of the traces file."""
         return self._path
+
+    @property
+    def enabled(self) -> bool:
+        """Whether trace collection is enabled by runtime settings."""
+        return self._enabled

@@ -636,22 +636,25 @@ class TestFindDocumentChunks:
     ):
         """Test finding chunks by ID prefix when source_ref search fails."""
         mock_collection = Mock()
+        valid_doc_id = "doc_0123456789abcdef"
+        prefixed_ids = [f"{valid_doc_id}_{i:04d}_legacy" for i, _ in enumerate(sample_chunks)]
         
         # First call (source_ref search) returns empty
         # Second call (get all) returns all chunks
         mock_collection.get.side_effect = [
             {'ids': [], 'documents': [], 'metadatas': []},
             {
-                'ids': [c['id'] for c in sample_chunks],
+                'ids': prefixed_ids,
                 'documents': [c['text'] for c in sample_chunks],
                 'metadatas': [c['metadata'] for c in sample_chunks],
             },
         ]
+        mock_collection.count.return_value = len(sample_chunks)
         
         # Mock the _get_collection method
         tool_with_config._get_collection = Mock(return_value=mock_collection)
         
-        result = tool_with_config._find_document_chunks("doc_abc123")
+        result = tool_with_config._find_document_chunks(valid_doc_id)
         
         assert len(result) == 3
     
