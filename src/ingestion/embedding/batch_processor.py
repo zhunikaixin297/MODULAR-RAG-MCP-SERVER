@@ -41,6 +41,8 @@ class BatchResult:
     total_time: float = 0.0
     successful_chunks: int = 0
     failed_chunks: int = 0
+    successful_indices: List[int] = field(default_factory=list)
+    failed_indices: List[int] = field(default_factory=list)
 
 
 class BatchProcessor:
@@ -155,6 +157,9 @@ class BatchProcessor:
         hypothetical_vectors: List[Optional[List[float]]] = []
         successful_chunks = 0
         failed_chunks = 0
+        successful_indices: List[int] = []
+        failed_indices: List[int] = []
+        offset = 0
         
         for batch_idx, batch in enumerate(batches):
             batch_start = time.time()
@@ -173,10 +178,12 @@ class BatchProcessor:
                     sparse_stats.extend(batch_sparse)
                 
                 successful_chunks += len(batch)
+                successful_indices.extend(range(offset, offset + len(batch)))
                 
             except Exception as e:
                 # Record failure but continue with remaining batches
                 failed_chunks += len(batch)
+                failed_indices.extend(range(offset, offset + len(batch)))
                 if trace:
                     trace.record_stage(
                         f"batch_{batch_idx}_error",
@@ -195,6 +202,7 @@ class BatchProcessor:
                         "chunks_processed": len(batch)
                     }
                 )
+            offset += len(batch)
         
         total_time = time.time() - start_time
         
@@ -208,6 +216,8 @@ class BatchProcessor:
                     "batch_size": self.batch_size,
                     "successful_chunks": successful_chunks,
                     "failed_chunks": failed_chunks,
+                    "successful_indices": successful_indices,
+                    "failed_indices": failed_indices,
                     "total_time_seconds": total_time
                 }
             )
@@ -220,7 +230,9 @@ class BatchProcessor:
             batch_count=batch_count,
             total_time=total_time,
             successful_chunks=successful_chunks,
-            failed_chunks=failed_chunks
+            failed_chunks=failed_chunks,
+            successful_indices=successful_indices,
+            failed_indices=failed_indices,
         )
 
     def _encode_batch_parallel(

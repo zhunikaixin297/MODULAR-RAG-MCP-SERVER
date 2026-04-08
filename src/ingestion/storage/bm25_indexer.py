@@ -162,7 +162,8 @@ class BM25Indexer:
                     postings.append({
                         "chunk_id": stat["chunk_id"],
                         "tf": tf,
-                        "doc_length": stat["doc_length"]
+                        "doc_length": stat["doc_length"],
+                        "document_id": stat.get("document_id"),
                     })
             
             index[term] = {
@@ -352,6 +353,7 @@ class BM25Indexer:
                         "chunk_id": cid,
                         "term_frequencies": {},
                         "doc_length": posting["doc_length"],
+                        "document_id": posting.get("document_id"),
                     }
                 existing_stats[cid]["term_frequencies"][term] = posting["tf"]
 
@@ -391,7 +393,10 @@ class BM25Indexer:
             original_len = len(term_data["postings"])
             term_data["postings"] = [
                 p for p in term_data["postings"]
-                if not p["chunk_id"].startswith(doc_id)
+                if not (
+                    p.get("document_id") == doc_id
+                    or p["chunk_id"].startswith(doc_id)
+                )
             ]
             if len(term_data["postings"]) < original_len:
                 removed_any = True
