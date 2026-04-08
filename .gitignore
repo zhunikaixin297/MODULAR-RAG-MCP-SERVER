@@ -108,3 +108,4 @@ secrets.yaml
 nonexistent_traces.jsonl/
 
 .worktrees
+docs
