@@ -19,6 +19,7 @@ Design Principles:
 from pathlib import Path
 from typing import Callable, List, Optional, Dict, Any
 import time
+from numbers import Integral
 import copy
 from concurrent.futures import ThreadPoolExecutor
 
@@ -336,9 +337,21 @@ class IngestionPipeline:
                 future_refine = executor.submit(self.chunk_refiner.transform, copy.deepcopy(base_chunks), None)
                 future_meta = executor.submit(self.metadata_enricher.transform, copy.deepcopy(base_chunks), None)
                 future_caption = executor.submit(self.image_captioner.transform, copy.deepcopy(base_chunks), None)
-                refined_chunks = future_refine.result()
-                meta_chunks = future_meta.result()
-                caption_chunks = future_caption.result()
+                try:
+                    refined_chunks = future_refine.result()
+                except Exception as e:
+                    logger.warning(f"Chunk refinement failed, fallback to base chunks: {e}")
+                    refined_chunks = copy.deepcopy(base_chunks)
+                try:
+                    meta_chunks = future_meta.result()
+                except Exception as e:
+                    logger.warning(f"Metadata enrichment failed, fallback to base chunks: {e}")
+                    meta_chunks = copy.deepcopy(base_chunks)
+                try:
+                    caption_chunks = future_caption.result()
+                except Exception as e:
+                    logger.warning(f"Image captioning failed, fallback to base chunks: {e}")
+                    caption_chunks = copy.deepcopy(base_chunks)
 
             refined_by_id = {c.id: c for c in refined_chunks}
             meta_by_id = {c.id: c for c in meta_chunks}
@@ -426,21 +439,72 @@ class IngestionPipeline:
             summary_vectors = getattr(batch_result, "summary_vectors", [None for _ in chunks])
             question_vectors = getattr(batch_result, "hypothetical_vectors", [None for _ in chunks])
 
+            def _coerce_chunk_indices(raw: object, default: list[int]) -> list[int]:
+                """Normalize optional index lists from BatchResult for backward compatibility."""
+                if isinstance(raw, (list, tuple)):
+                    normalized: list[int] = []
+                    for item in raw:
+                        if isinstance(item, Integral):
+                            idx = int(item)
+                            if 0 <= idx < len(chunks):
+                                normalized.append(idx)
+                    return normalized
+                return list(default)
+
+            successful_indices = _coerce_chunk_indices(
+                getattr(batch_result, "successful_indices", None),
+                list(range(len(chunks))),
+            )
+            failed_indices = _coerce_chunk_indices(
+                getattr(batch_result, "failed_indices", None),
+                [],
+            )
+
+            if len(failed_indices) > 0:
+                logger.warning(
+                    "Batch encoding had partial failures: %d failed chunks, proceeding with %d successful chunks",
+                    len(failed_indices),
+                    len(successful_indices),
+                )
+            if not successful_indices:
+                raise RuntimeError("Encoding failed for all chunks; no chunks available for storage")
+
             logger.info(f"  Dense vectors: {len(dense_vectors)} (dim={len(dense_vectors[0]) if dense_vectors else 0})")
             if sparse_stats:
                 logger.info(f"  Sparse stats: {len(sparse_stats)} documents")
+
+            if len(dense_vectors) != len(successful_indices):
+                raise RuntimeError(
+                    f"Dense vector count ({len(dense_vectors)}) does not match successful chunk count ({len(successful_indices)})"
+                )
+
+            chunks_for_storage = [chunks[idx] for idx in successful_indices]
+            if len(summary_vectors) == len(chunks):
+                summary_vectors = [summary_vectors[idx] for idx in successful_indices]
+            if len(question_vectors) == len(chunks):
+                question_vectors = [question_vectors[idx] for idx in successful_indices]
+
+            if sparse_stats and len(sparse_stats) != len(chunks_for_storage):
+                logger.warning(
+                    "Sparse stats count (%d) does not match successful chunks (%d), disabling BM25 update for this run",
+                    len(sparse_stats),
+                    len(chunks_for_storage),
+                )
+                sparse_stats = []
             
             stages["encoding"] = {
                 "dense_vector_count": len(dense_vectors),
                 "dense_dimension": len(dense_vectors[0]) if dense_vectors else 0,
                 "sparse_doc_count": len(sparse_stats),
                 "summary_vector_count": len([v for v in summary_vectors if v is not None]),
-                "hypothetical_vector_count": len([v for v in question_vectors if v is not None])
+                "hypothetical_vector_count": len([v for v in question_vectors if v is not None]),
+                "successful_chunks": len(successful_indices),
+                "failed_chunks": len(failed_indices),
             }
             if trace is not None:
                 # Build per-chunk encoding details (both dense & sparse)
                 chunk_details = []
-                for idx, c in enumerate(chunks):
+                for idx, c in enumerate(chunks_for_storage):
                     detail: dict = {
                         "chunk_id": c.id,
                         "char_len": len(c.text),
@@ -477,7 +541,7 @@ class IngestionPipeline:
             logger.info("  6a. Vector Storage...")
             _t0_storage = time.monotonic()
             vector_ids = self.vector_upserter.upsert(
-                chunks,
+                chunks_for_storage,
                 dense_vectors,
                 trace,
                 extra_vectors={
@@ -490,6 +554,7 @@ class IngestionPipeline:
             if sparse_stats:
                 for stat, vid in zip(sparse_stats, vector_ids):
                     stat["chunk_id"] = vid
+                    stat["document_id"] = document.id
             
             # 6b: BM25 Index
             if self.bm25_indexer is not None and sparse_stats:
@@ -521,7 +586,9 @@ class IngestionPipeline:
             stages["storage"] = {
                 "vector_count": len(vector_ids),
                 "bm25_docs": len(sparse_stats),
-                "images_indexed": len(images)
+                "images_indexed": len(images),
+                "partial_encoding_failure": len(failed_indices) > 0,
+                "failed_chunk_count": len(failed_indices),
             }
             _elapsed_storage = (time.monotonic() - _t0_storage) * 1000.0
             if trace is not None:
@@ -533,7 +600,7 @@ class IngestionPipeline:
                         "collection": self.collection,
                         "store": "ChromaDB",
                     }
-                    for i, c in enumerate(chunks)
+                    for i, c in enumerate(chunks_for_storage)
                 ]
                 # Image storage details
                 image_storage_details = [
@@ -570,7 +637,11 @@ class IngestionPipeline:
             # ─────────────────────────────────────────────────────────────
             # Mark Success
             # ─────────────────────────────────────────────────────────────
-            self.integrity_checker.mark_success(file_hash, str(file_path), self.collection)
+            if failed_indices:
+                partial_error = f"partial_encoding_failure: {len(failed_indices)} chunks failed during encoding"
+                self.integrity_checker.mark_failed(file_hash, str(file_path), partial_error, self.collection)
+            else:
+                self.integrity_checker.mark_success(file_hash, str(file_path), self.collection)
             
             logger.info("\n" + "=" * 60)
             logger.info("✅ Pipeline completed successfully!")
@@ -583,7 +654,7 @@ class IngestionPipeline:
                 success=True,
                 file_path=str(file_path),
                 doc_id=file_hash,
-                chunk_count=len(chunks),
+                chunk_count=len(chunks_for_storage),
                 image_count=len(images),
                 vector_ids=vector_ids,
                 stages=stages
@@ -591,7 +662,8 @@ class IngestionPipeline:
             
         except Exception as e:
             logger.error(f"❌ Pipeline failed: {e}", exc_info=True)
-            self.integrity_checker.mark_failed(file_hash, str(file_path), str(e), self.collection)
+            if "file_hash" in locals():
+                self.integrity_checker.mark_failed(file_hash, str(file_path), str(e), self.collection)
             
             return PipelineResult(
                 success=False,

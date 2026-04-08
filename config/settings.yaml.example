@@ -14,7 +14,7 @@ llm:
   provider: "openai"  # Options: openai, azure, ollama, deepseek
   model: "gpt-4o-mini"
   base_url: "https://api.openai.com/v1"
-  api_key: "${OPENAI_API_KEY}" # Read from environment variable
+  api_key: "sk-replace-with-real-key"
   temperature: 0.1
   max_tokens: 4096
 
@@ -25,7 +25,7 @@ embedding:
   provider: "openai" # Options: openai, azure, ollama
   model: "text-embedding-3-small"
   dimensions: 1536
-  api_key: "${OPENAI_API_KEY}"
+  api_key: "sk-replace-with-real-key"
 
 # =============================================================================
 # Vision LLM Configuration
@@ -34,7 +34,7 @@ vision_llm:
   enabled: true
   provider: "openai" 
   model: "gpt-4o"
-  api_key: "${OPENAI_API_KEY}"
+  api_key: "sk-replace-with-real-key"
   max_image_size: 2048
 
 # =============================================================================

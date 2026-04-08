@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from threading import Thread, RLock
 from typing import Any, Dict, List, Optional
 import jieba
@@ -44,9 +46,12 @@ class OpenSearchStore(BaseVectorStore):
         self.default_collection = collection_name or base_index_name
         self.timeout_seconds = getattr(opensearch_config, "timeout_seconds", 60)
         self.max_retries = getattr(opensearch_config, "max_retries", 3)
+        self.max_attempts = max(1, int(self.max_retries) + 1)
         self.max_concurrency = getattr(opensearch_config, "max_concurrency", 10)
         self.batch_size = getattr(opensearch_config, "batch_size", 200)
         self.refresh = getattr(opensearch_config, "refresh", False)
+        self.retry_backoff_seconds = float(getattr(opensearch_config, "retry_backoff_seconds", 0.5))
+        self.retry_backoff_max_seconds = float(getattr(opensearch_config, "retry_backoff_max_seconds", 8.0))
 
         hosts = getattr(opensearch_config, "hosts", None)
         if not hosts:
@@ -275,7 +280,11 @@ class OpenSearchStore(BaseVectorStore):
 
     async def _ensure_index(self, index_name: str) -> None:
         try:
-            exists = await self.client.indices.exists(index=index_name)
+            exists = await self._async_with_retry(
+                "indices.exists",
+                self.client.indices.exists,
+                index=index_name,
+            )
         except Exception as e:
             logger.error(f"OpenSearch index existence check failed: {e}", exc_info=True)
             raise
@@ -315,7 +324,12 @@ class OpenSearchStore(BaseVectorStore):
         }
 
         try:
-            await self.client.indices.create(index=index_name, body=body)
+            await self._async_with_retry(
+                "indices.create",
+                self.client.indices.create,
+                index=index_name,
+                body=body,
+            )
         except Exception as e:
             logger.error(f"OpenSearch index creation failed: {e}", exc_info=True)
             raise
@@ -353,7 +367,9 @@ class OpenSearchStore(BaseVectorStore):
         async def _bulk_batch(batch: List[Dict[str, Any]]) -> None:
             async with semaphore:
                 try:
-                    await async_bulk(
+                    success_count, errors = await self._async_with_retry(
+                        "bulk_upsert",
+                        async_bulk,
                         self.client,
                         batch,
                         chunk_size=self.batch_size,
@@ -361,6 +377,13 @@ class OpenSearchStore(BaseVectorStore):
                         request_timeout=self.timeout_seconds,
                         refresh="wait_for" if self.refresh else False,
                     )
+                    if errors:
+                        sample = errors[0]
+                        raise RuntimeError(
+                            f"OpenSearch bulk upsert had {len(errors)} item errors; sample={sample}"
+                        )
+                    if success_count <= 0:
+                        raise RuntimeError("OpenSearch bulk upsert produced no successful writes")
                 except Exception as e:
                     logger.error(f"OpenSearch bulk upsert failed: {e}", exc_info=True)
                     raise
@@ -407,7 +430,12 @@ class OpenSearchStore(BaseVectorStore):
         }
 
         try:
-            response = await self.client.search(index=index_name, body=query)
+            response = await self._async_with_retry(
+                "search_vector",
+                self.client.search,
+                index=index_name,
+                body=query,
+            )
         except Exception as e:
             logger.error(f"OpenSearch query failed: {e}", exc_info=True)
             raise RuntimeError(f"OpenSearch query failed: {e}") from e
@@ -460,7 +488,12 @@ class OpenSearchStore(BaseVectorStore):
             },
         }
         try:
-            response = await self.client.search(index=index_name, body=query)
+            response = await self._async_with_retry(
+                "search_keyword",
+                self.client.search,
+                index=index_name,
+                body=query,
+            )
         except Exception as e:
             logger.error(f"OpenSearch keyword search failed: {e}", exc_info=True)
             raise RuntimeError(f"OpenSearch keyword search failed: {e}") from e
@@ -485,7 +518,9 @@ class OpenSearchStore(BaseVectorStore):
             for id_ in ids
         ]
         try:
-            await async_bulk(
+            success_count, errors = await self._async_with_retry(
+                "bulk_delete",
+                async_bulk,
                 self.client,
                 actions,
                 chunk_size=self.batch_size,
@@ -493,16 +528,28 @@ class OpenSearchStore(BaseVectorStore):
                 request_timeout=self.timeout_seconds,
                 refresh="wait_for" if self.refresh else False,
             )
+            if errors:
+                raise RuntimeError(f"OpenSearch delete had {len(errors)} item errors")
+            if success_count < 0:
+                raise RuntimeError("OpenSearch delete returned invalid success count")
         except Exception as e:
             logger.error(f"OpenSearch delete failed: {e}", exc_info=True)
             raise RuntimeError(f"OpenSearch delete failed: {e}") from e
 
     async def _async_clear(self, index_name: str) -> None:
         try:
-            exists = await self.client.indices.exists(index=index_name)
+            exists = await self._async_with_retry(
+                "indices.exists",
+                self.client.indices.exists,
+                index=index_name,
+            )
             if exists:
-                await self.client.indices.delete(index=index_name)
-            await self.client.indices.create(index=index_name, body={
+                await self._async_with_retry(
+                    "indices.delete",
+                    self.client.indices.delete,
+                    index=index_name,
+                )
+            await self._async_with_retry("indices.create", self.client.indices.create, index=index_name, body={
                 "settings": {"index": {"knn": True}},
                 "mappings": {
                     "properties": {
@@ -525,7 +572,9 @@ class OpenSearchStore(BaseVectorStore):
 
     async def _async_get_by_ids(self, ids: List[str], index_name: str) -> List[Dict[str, Any]]:
         try:
-            response = await self.client.mget(
+            response = await self._async_with_retry(
+                "mget",
+                self.client.mget,
                 index=index_name,
                 body={"ids": [str(id_) for id_ in ids]},
             )
@@ -561,7 +610,9 @@ class OpenSearchStore(BaseVectorStore):
             must_terms.append({"term": {field: value}})
         query = {"query": {"bool": {"must": must_terms}}}
         try:
-            response = await self.client.delete_by_query(
+            response = await self._async_with_retry(
+                "delete_by_query",
+                self.client.delete_by_query,
                 index=index_name,
                 body=query,
                 refresh="wait_for" if self.refresh else False,
@@ -582,7 +633,12 @@ class OpenSearchStore(BaseVectorStore):
             "size": 10000,  # Max result size for this operation
         }
         try:
-            response = await self.client.search(index=index_name, body=query)
+            response = await self._async_with_retry(
+                "search_ids_by_metadata",
+                self.client.search,
+                index=index_name,
+                body=query,
+            )
             hits = response.get("hits", {}).get("hits", [])
             return [hit["_id"] for hit in hits]
         except Exception as e:
@@ -596,7 +652,12 @@ class OpenSearchStore(BaseVectorStore):
             must_terms.append({"term": {field: value}})
         query = {"query": {"bool": {"must": must_terms}}}
         try:
-            response = await self.client.count(index=index_name, body=query)
+            response = await self._async_with_retry(
+                "count_by_metadata",
+                self.client.count,
+                index=index_name,
+                body=query,
+            )
             return int(response.get("count", 0))
         except Exception as e:
             logger.error(f"OpenSearch count_by_metadata failed: {e}", exc_info=True)
@@ -613,7 +674,12 @@ class OpenSearchStore(BaseVectorStore):
             "sort": [{"metadata.chunk_index": {"order": "asc"}}],
         }
         try:
-            response = await self.client.search(index=index_name, body=query)
+            response = await self._async_with_retry(
+                "search_by_metadata",
+                self.client.search,
+                index=index_name,
+                body=query,
+            )
             hits = response.get("hits", {}).get("hits", [])
             results = []
             for hit in hits:
@@ -633,7 +699,14 @@ class OpenSearchStore(BaseVectorStore):
         if self._bg_loop is None or self._bg_loop.is_closed():
             raise RuntimeError("OpenSearch background event loop is closed")
         future = asyncio.run_coroutine_threadsafe(coro, self._bg_loop)
-        return future.result()
+        try:
+            timeout = max(10, int(self.timeout_seconds) + 10)
+            return future.result(timeout=timeout)
+        except FutureTimeoutError as e:
+            future.cancel()
+            raise RuntimeError(
+                f"OpenSearch operation timed out after {timeout} seconds"
+            ) from e
 
     def _resolve_collection(self, collection: Optional[str]) -> str:
         return collection or self.default_collection
@@ -644,3 +717,31 @@ class OpenSearchStore(BaseVectorStore):
                 return
             self._run_async(self._ensure_index(index_name))
             self._ensured_indices.add(index_name)
+
+    def _backoff_delay(self, attempt: int) -> float:
+        base = self.retry_backoff_seconds * (2 ** attempt)
+        bounded = min(base, self.retry_backoff_max_seconds)
+        jitter = random.uniform(0, bounded * 0.2) if bounded > 0 else 0.0
+        return bounded + jitter
+
+    async def _async_with_retry(self, op_name: str, func: Any, *args: Any, **kwargs: Any) -> Any:
+        attempt = 0
+        while True:
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                if attempt >= self.max_attempts - 1:
+                    raise RuntimeError(
+                        f"OpenSearch {op_name} failed after {self.max_attempts} attempts: {e}"
+                    ) from e
+                delay = self._backoff_delay(attempt)
+                logger.warning(
+                    "OpenSearch %s failed (attempt %d/%d): %s; retrying in %.2fs",
+                    op_name,
+                    attempt + 1,
+                    self.max_attempts,
+                    e,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                attempt += 1

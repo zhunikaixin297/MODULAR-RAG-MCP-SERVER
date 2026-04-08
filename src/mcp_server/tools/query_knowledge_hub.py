@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections import OrderedDict
+from threading import RLock
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -83,6 +86,9 @@ class QueryKnowledgeHubConfig:
     max_top_k: int = 20
     default_collection: Optional[str] = None
     enable_rerank: bool = True
+    search_max_attempts: int = 3
+    search_retry_backoff_seconds: float = 0.4
+    max_cached_collections: int = 16
 
 
 class QueryKnowledgeHubTool:
@@ -126,6 +132,8 @@ class QueryKnowledgeHubTool:
         self._embedding_client = None
         self._vector_store = None
         self._response_builder = response_builder or ResponseBuilder()
+        self._init_lock = RLock()
+        self._hybrid_search_by_collection: "OrderedDict[str, HybridSearch]" = OrderedDict()
         
         # Track initialization state
         self._initialized = False
@@ -137,88 +145,107 @@ class QueryKnowledgeHubTool:
             self._settings = load_settings()
         return self._settings
     
-    def _ensure_initialized(self, collection: str) -> None:
+    def _ensure_initialized(self, collection: str) -> HybridSearch:
         """Ensure search components are initialized for the given collection.
         
         Caching strategy (balances speed vs freshness):
         - **Fully cached** (stateless, never go stale): embedding client,
           reranker, query processor, settings.
-        - **Cached until collection changes**: vector store (ChromaDB
-          PersistentClient reads from SQLite — sees data written by other
-          processes), dense retriever, hybrid search.
+        - **Collection-scoped cache**: each collection has its own
+          HybridSearch pipeline instance to avoid re-initialization thrash
+          under alternating-collection traffic.
         - **Auto-refreshes on every query**: BM25 sparse index — the
           ``SparseRetriever._ensure_index_loaded()`` always reloads from
           disk, so the cached SparseRetriever object is fine.
-        
-        Only when *collection* changes do we tear down and rebuild.
+        - **Thread-safe initialization**: guarded by a lock so concurrent
+          requests switching collections do not race on shared mutable state.
         
         Args:
             collection: Target collection name.
+
+        Returns:
+            HybridSearch instance bound to this collection.
         """
-        if self._initialized and self._hybrid_search is not None:
-            return
-        
-        logger.info(f"Initializing query components for collection: {collection}")
-        
-        # Import here to avoid circular imports and allow lazy loading
-        from src.core.query_engine.query_processor import QueryProcessor
-        from src.core.query_engine.hybrid_search import create_hybrid_search
-        from src.core.query_engine.dense_retriever import create_dense_retriever
-        from src.core.query_engine.sparse_retriever import create_sparse_retriever
-        from src.core.query_engine.reranker import create_core_reranker
-        from src.ingestion.storage.bm25_indexer import BM25Indexer
-        from src.libs.embedding.embedding_factory import EmbeddingFactory
-        from src.libs.vector_store.vector_store_factory import VectorStoreFactory
-        
-        # === Fully cached components (stateless, never go stale) ===
-        if self._embedding_client is None:
-            self._embedding_client = EmbeddingFactory.create(self.settings)
-        
-        if self._reranker is None:
-            self._reranker = create_core_reranker(settings=self.settings)
-        
-        # === Vector store (single instance with dynamic collections) ===
-        if self._vector_store is None:
-            self._vector_store = VectorStoreFactory.create(self.settings)
-        vector_store = self._vector_store
-        
-        dense_retriever = create_dense_retriever(
-            settings=self.settings,
-            embedding_client=self._embedding_client,
-            vector_store=vector_store,
-        )
-        
-        sparse_retriever = None
-        sparse_enabled = getattr(getattr(self.settings, "retrieval", None), "sparse_enabled", True)
-        vector_provider = getattr(getattr(self.settings, "vector_store", None), "provider", "chroma").lower()
-        if sparse_enabled and vector_provider == "chroma":
-            bm25_indexer = BM25Indexer(index_dir=str(resolve_path("data/db/bm25")))
-            sparse_retriever = create_sparse_retriever(
+        with self._init_lock:
+            cached = self._hybrid_search_by_collection.get(collection)
+            if cached is not None:
+                self._hybrid_search_by_collection.move_to_end(collection)
+                return cached
+
+            logger.info(f"Initializing query components for collection: {collection}")
+
+            # Import here to avoid circular imports and allow lazy loading
+            from src.core.query_engine.query_processor import QueryProcessor
+            from src.core.query_engine.hybrid_search import create_hybrid_search
+            from src.core.query_engine.dense_retriever import create_dense_retriever
+            from src.core.query_engine.sparse_retriever import create_sparse_retriever
+            from src.core.query_engine.reranker import create_core_reranker
+            from src.ingestion.storage.bm25_indexer import BM25Indexer
+            from src.libs.embedding.embedding_factory import EmbeddingFactory
+            from src.libs.vector_store.vector_store_factory import VectorStoreFactory
+
+            # === Fully cached components (stateless, never go stale) ===
+            if self._embedding_client is None:
+                self._embedding_client = EmbeddingFactory.create(self.settings)
+
+            if self._reranker is None:
+                self._reranker = create_core_reranker(settings=self.settings)
+
+            # === Vector store (single shared instance with dynamic collections) ===
+            if self._vector_store is None:
+                self._vector_store = VectorStoreFactory.create(self.settings)
+            vector_store = self._vector_store
+
+            dense_retriever = create_dense_retriever(
                 settings=self.settings,
-                bm25_indexer=bm25_indexer,
+                embedding_client=self._embedding_client,
                 vector_store=vector_store,
             )
-        
-        query_processor = QueryProcessor()
-        self._hybrid_search = create_hybrid_search(
-            settings=self.settings,
-            query_processor=query_processor,
-            dense_retriever=dense_retriever,
-            sparse_retriever=sparse_retriever,
-        )
-        
-        self._initialized = True
-        logger.info(f"Query components initialized for collection: {collection}")
+
+            sparse_retriever = None
+            sparse_enabled = getattr(getattr(self.settings, "retrieval", None), "sparse_enabled", True)
+            vector_provider = getattr(getattr(self.settings, "vector_store", None), "provider", "chroma").lower()
+            if sparse_enabled and vector_provider == "chroma":
+                bm25_indexer = BM25Indexer(index_dir=str(resolve_path("data/db/bm25")))
+                sparse_retriever = create_sparse_retriever(
+                    settings=self.settings,
+                    bm25_indexer=bm25_indexer,
+                    vector_store=vector_store,
+                )
+
+            query_processor = QueryProcessor()
+            hybrid = create_hybrid_search(
+                settings=self.settings,
+                query_processor=query_processor,
+                dense_retriever=dense_retriever,
+                sparse_retriever=sparse_retriever,
+            )
+
+            self._hybrid_search_by_collection[collection] = hybrid
+            self._hybrid_search_by_collection.move_to_end(collection)
+            cache_limit = max(1, int(self.config.max_cached_collections))
+            while len(self._hybrid_search_by_collection) > cache_limit:
+                evicted_collection, _ = self._hybrid_search_by_collection.popitem(last=False)
+                logger.info("Evicted cached query pipeline for collection: %s", evicted_collection)
+            self._hybrid_search = hybrid
+            self._initialized = True
+            logger.info(f"Query components initialized for collection: {collection}")
+            return hybrid
 
     async def close(self) -> None:
-        if self._vector_store is None:
+        with self._init_lock:
+            self._hybrid_search_by_collection.clear()
+            self._hybrid_search = None
+            self._initialized = False
+            vector_store = self._vector_store
+            self._vector_store = None
+        if vector_store is None:
             return
-        close_fn = getattr(self._vector_store, "close", None)
+        close_fn = getattr(vector_store, "close", None)
         if callable(close_fn):
             close_result = close_fn()
             if asyncio.iscoroutine(close_result):
                 await close_result
-        self._vector_store = None
     
     async def execute(
         self,
@@ -271,7 +298,7 @@ class QueryKnowledgeHubTool:
             # to avoid blocking the async event loop / MCP stdio transport
             import time as _time
             _init_t0 = _time.monotonic()
-            await asyncio.to_thread(self._ensure_initialized, effective_collection)
+            hybrid_search = await asyncio.to_thread(self._ensure_initialized, effective_collection)
             _init_elapsed = (_time.monotonic() - _init_t0) * 1000.0
             trace.record_stage("initialization", {
                 "collection": effective_collection,
@@ -280,7 +307,7 @@ class QueryKnowledgeHubTool:
             
             # Perform hybrid search (blocking: embedding API + DB queries)
             results = await asyncio.to_thread(
-                self._perform_search, query, effective_top_k, effective_collection, trace,
+                self._perform_search, hybrid_search, query, effective_top_k, effective_collection, trace,
             )
             
             # Apply reranking if enabled (may call LLM API)
@@ -324,6 +351,7 @@ class QueryKnowledgeHubTool:
     
     def _perform_search(
         self,
+        hybrid_search: HybridSearch,
         query: str,
         top_k: int,
         collection: str,
@@ -339,24 +367,33 @@ class QueryKnowledgeHubTool:
         Returns:
             List of RetrievalResult.
         """
-        if self._hybrid_search is None:
-            raise RuntimeError("HybridSearch not initialized")
-        
         # Use a larger initial retrieval for reranking
         initial_top_k = top_k * 2 if self.config.enable_rerank else top_k
-        
-        try:
-            results = self._hybrid_search.search(
-                query=query,
-                top_k=initial_top_k,
-                filters={"collection": collection},
-                trace=trace,
-                return_details=False,
-            )
-            return results if isinstance(results, list) else results.results
-        except Exception as e:
-            logger.warning(f"Hybrid search failed: {e}")
-            return []
+
+        attempts = max(1, int(self.config.search_max_attempts))
+        for attempt in range(attempts):
+            try:
+                results = hybrid_search.search(
+                    query=query,
+                    top_k=initial_top_k,
+                    filters={"collection": collection},
+                    trace=trace,
+                    return_details=False,
+                )
+                return results if isinstance(results, list) else results.results
+            except Exception as e:
+                if attempt >= attempts - 1:
+                    raise RuntimeError(f"Hybrid search failed after {attempts} attempts: {e}") from e
+                delay = self.config.search_retry_backoff_seconds * (2 ** attempt)
+                logger.warning(
+                    "Hybrid search failed (attempt %d/%d): %s; retrying in %.2fs",
+                    attempt + 1,
+                    attempts,
+                    e,
+                    delay,
+                )
+                time.sleep(delay)
+        raise RuntimeError("Hybrid search failed unexpectedly")
     
     def _apply_rerank(
         self,

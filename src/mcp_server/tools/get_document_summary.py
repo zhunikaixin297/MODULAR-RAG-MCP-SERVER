@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from threading import RLock
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -104,6 +106,7 @@ class GetDocumentSummaryConfig:
     persist_directory: str = "./data/db/chroma"
     default_collection: str = "knowledge_hub"
     summary_max_length: int = 500
+    max_prefix_scan_chunks: int = 5000
 
 
 class DocumentNotFoundError(Exception):
@@ -151,6 +154,7 @@ class GetDocumentSummaryTool:
         self._config = config
         self._chroma_client = None
         self._vector_store = None
+        self._init_lock = RLock()
         
     @property
     def settings(self) -> Settings:
@@ -195,37 +199,38 @@ class GetDocumentSummaryTool:
             ImportError: If chromadb is not installed.
             RuntimeError: If client creation fails.
         """
-        if self._chroma_client is not None:
-            return self._chroma_client
+        with self._init_lock:
+            if self._chroma_client is not None:
+                return self._chroma_client
         
-        try:
-            import chromadb
-            from chromadb.config import Settings as ChromaSettings
-        except ImportError:
-            raise ImportError(
-                "chromadb package is required for get_document_summary. "
-                "Install it with: pip install chromadb"
-            )
-        
-        persist_path = Path(self.config.persist_directory).resolve()
-        
-        if not persist_path.exists():
-            logger.warning(f"ChromaDB directory does not exist: {persist_path}")
-            persist_path.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            self._chroma_client = chromadb.PersistentClient(
-                path=str(persist_path),
-                settings=ChromaSettings(
-                    anonymized_telemetry=False,
-                    allow_reset=True,
+            try:
+                import chromadb
+                from chromadb.config import Settings as ChromaSettings
+            except ImportError:
+                raise ImportError(
+                    "chromadb package is required for get_document_summary. "
+                    "Install it with: pip install chromadb"
                 )
-            )
-            return self._chroma_client
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to initialize ChromaDB client at '{persist_path}': {e}"
-            ) from e
+        
+            persist_path = Path(self.config.persist_directory).resolve()
+        
+            if not persist_path.exists():
+                logger.warning(f"ChromaDB directory does not exist: {persist_path}")
+                persist_path.mkdir(parents=True, exist_ok=True)
+        
+            try:
+                self._chroma_client = chromadb.PersistentClient(
+                    path=str(persist_path),
+                    settings=ChromaSettings(
+                        anonymized_telemetry=False,
+                        allow_reset=True,
+                    )
+                )
+                return self._chroma_client
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to initialize ChromaDB client at '{persist_path}': {e}"
+                ) from e
     
     def _get_collection(self, collection_name: Optional[str] = None) -> Any:
         """Get ChromaDB collection.
@@ -253,9 +258,20 @@ class GetDocumentSummaryTool:
 
     def _get_vector_store(self) -> Any:
         """Get or create vector store instance from configured provider."""
-        if self._vector_store is None:
-            self._vector_store = VectorStoreFactory.create(self.settings)
-        return self._vector_store
+        with self._init_lock:
+            if self._vector_store is None:
+                self._vector_store = VectorStoreFactory.create(self.settings)
+            return self._vector_store
+
+    def _normalize_doc_hash(self, doc_id: str) -> Optional[str]:
+        """Normalize user-provided doc identifier to 64-hex doc_hash when possible."""
+        if re.fullmatch(r"[0-9a-fA-F]{64}", doc_id or ""):
+            return doc_id.lower()
+        return None
+
+    def _is_source_ref_doc_id(self, doc_id: str) -> bool:
+        """Validate source_ref-style document IDs for controlled prefix fallback."""
+        return re.fullmatch(r"doc_[0-9a-fA-F]{16}", doc_id or "") is not None
 
     def _find_document_chunks_opensearch(
         self,
@@ -301,8 +317,8 @@ class GetDocumentSummaryTool:
     ) -> List[Dict[str, Any]]:
         """Find all chunks belonging to a document.
         
-        Searches for chunks where source_ref matches the doc_id.
-        Falls back to partial matching on chunk IDs if source_ref is not available.
+        Searches for chunks where source_ref matches doc_id.
+        Falls back to exact doc_hash metadata match when doc_id is a 64-hex hash.
         
         Args:
             doc_id: Document ID to search for.
@@ -343,17 +359,52 @@ class GetDocumentSummaryTool:
         except Exception as e:
             logger.debug(f"source_ref search failed: {e}")
         
-        # Strategy 2: Search by doc_id in chunk ID prefix
-        # Chunk IDs follow format: {doc_id}_{index:04d}_{hash}
+        # Strategy 2: Exact doc_hash match (safe and indexed metadata key)
+        doc_hash = self._normalize_doc_hash(doc_id)
+        if doc_hash:
+            try:
+                hash_results = collection.get(
+                    where={"doc_hash": doc_hash},
+                    include=["metadatas", "documents"]
+                )
+
+                if hash_results and hash_results.get('ids'):
+                    chunks = []
+                    for i, chunk_id in enumerate(hash_results['ids']):
+                        chunks.append({
+                            'id': chunk_id,
+                            'text': hash_results['documents'][i] if hash_results.get('documents') else '',
+                            'metadata': hash_results['metadatas'][i] if hash_results.get('metadatas') else {}
+                        })
+                    if chunks:
+                        return chunks
+            except Exception as e:
+                logger.debug(f"doc_hash search failed: {e}")
+        
+        # Strategy 3 (controlled compatibility fallback):
+        # For legacy datasets lacking source_ref/doc_hash metadata, we allow
+        # strict prefix matching on chunk IDs only when collection size is
+        # below a configurable safety threshold.
+        if not self._is_source_ref_doc_id(doc_id):
+            return []
         try:
-            # Get all chunks and filter by ID prefix
+            total = int(collection.count())
+        except Exception:
+            total = self.config.max_prefix_scan_chunks + 1
+        if total > self.config.max_prefix_scan_chunks:
+            logger.warning(
+                "Skipping prefix fallback for doc_id=%s because collection size %d exceeds max_prefix_scan_chunks=%d",
+                doc_id,
+                total,
+                self.config.max_prefix_scan_chunks,
+            )
+            return []
+        try:
             all_results = collection.get(include=["metadatas", "documents"])
-            
             if all_results and all_results.get('ids'):
                 chunks = []
                 for i, chunk_id in enumerate(all_results['ids']):
-                    # Check if chunk_id starts with doc_id
-                    if chunk_id.startswith(doc_id) or doc_id in chunk_id:
+                    if isinstance(chunk_id, str) and chunk_id.startswith(f"{doc_id}_"):
                         chunks.append({
                             'id': chunk_id,
                             'text': all_results['documents'][i] if all_results.get('documents') else '',
@@ -362,8 +413,8 @@ class GetDocumentSummaryTool:
                 if chunks:
                     return chunks
         except Exception as e:
-            logger.debug(f"ID prefix search failed: {e}")
-        
+            logger.debug(f"Controlled prefix fallback failed: {e}")
+
         # No chunks found
         return []
     

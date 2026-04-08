@@ -152,12 +152,16 @@ class TestIngestionPipeline:
                 assert storage["bm25_docs"] >= 0
             print(f"[OK] Storage: {storage['vector_count']} vectors, {storage['bm25_docs']} BM25 docs")
             
-            # Verify files were created
-            chroma_dir = Path(settings.vector_store.persist_directory)
-            assert chroma_dir.exists(), "ChromaDB directory should exist"
+            # Verify backend-specific artifacts
+            provider = str(getattr(settings.vector_store, "provider", "")).lower()
+            if provider == "chroma":
+                chroma_dir = Path(settings.vector_store.persist_directory)
+                assert chroma_dir.exists(), "ChromaDB directory should exist"
             
-            bm25_root = Path("data/db/bm25")
-            assert bm25_root.exists(), "BM25 index root directory should exist"
+            bm25_enabled = bool(getattr(settings.ingestion, "bm25_enabled", True))
+            if bm25_enabled:
+                bm25_root = Path("data/db/bm25")
+                assert bm25_root.exists(), "BM25 index root directory should exist"
             
             print("\n" + "=" * 60)
             print("SUCCESS - All pipeline stages completed!")
